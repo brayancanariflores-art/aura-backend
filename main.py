@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.4.2")
+app = FastAPI(title="Aura Cloud Brain", version="3.5")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -105,6 +105,29 @@ def inicializar_memoria():
 
 
 inicializar_memoria()
+
+
+def inicializar_auditoria():
+    with conectar_memoria() as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS auditoria_memoria (
+            evento_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            accion TEXT NOT NULL,
+            recuerdo_id TEXT NOT NULL,
+            anterior TEXT,
+            nuevo TEXT,
+            detalle TEXT NOT NULL DEFAULT ''
+        )""")
+
+
+def registrar_evento(conn, accion, rid, anterior=None, nuevo=None, detalle=""):
+    """Se escribe en la MISMA transaccion que la mutacion de SQLite."""
+    conn.execute("""INSERT INTO auditoria_memoria
+        (accion, recuerdo_id, anterior, nuevo, detalle)
+        VALUES (?, ?, ?, ?, ?)""", (accion, rid, anterior, nuevo, detalle))
+
+
+inicializar_auditoria()
 
 # Copia local inicial de seguridad. Para respaldo externo, usa Backups de Railway.
 BACKUP_PATH = os.path.join(DATA_DIR, "aura_memories_pre_v3.db")
@@ -314,7 +337,13 @@ def fusionar_recuerdos_existentes(ids, contenido):
                 raise HTTPException(status_code=404, detail="Alguno de los recuerdos no existe")
             respaldo_memoria()
             conservar = ids[0]
+            anteriores = dict(filas)
+            registrar_evento(conn, "fusion_actualizacion", conservar, anteriores[conservar], contenido,
+                             "Fusion manual con: " + ",".join(ids[1:]))
             conn.execute("UPDATE recuerdos SET contenido=? WHERE id=?", (contenido, conservar))
+            for rid in ids[1:]:
+                registrar_evento(conn, "fusion_eliminacion", rid, anteriores[rid], None,
+                                 "Fusion manual; conservado: " + conservar)
             conn.executemany("DELETE FROM recuerdos WHERE id=?", [(x,) for x in ids[1:]])
         try:
             collection.upsert(ids=[conservar], documents=[contenido],
@@ -348,6 +377,7 @@ def guardar_recuerdo(contenido):
         with conectar_memoria() as conn:
             conn.execute("INSERT INTO recuerdos (id, contenido) VALUES (?, ?)",
                          (identificador, contenido))
+            registrar_evento(conn, "creacion", identificador, None, contenido)
         try:
             collection.upsert(ids=[identificador], documents=[contenido],
                               metadatas=[{"tipo": "recuerdo_aprobado"}])
@@ -360,8 +390,11 @@ def eliminar_recuerdos():
     recuerdos = listar_recuerdos()
     if recuerdos:
         respaldo_memoria()
-    with conectar_memoria() as conn:
-        conn.execute("DELETE FROM recuerdos")
+    with MEMORY_LOCK:
+        with conectar_memoria() as conn:
+            for rid, anterior in recuerdos:
+                registrar_evento(conn, "eliminacion", rid, anterior, None)
+            conn.execute("DELETE FROM recuerdos")
     try:
         if recuerdos:
             collection.delete(ids=[fila[0] for fila in recuerdos])
@@ -460,10 +493,13 @@ def actualizar_recuerdo(identificador, contenido):
     try:
         with MEMORY_LOCK:
             with conectar_memoria() as conn:
-                existe = conn.execute("SELECT 1 FROM recuerdos WHERE id=?", (identificador,)).fetchone()
+                existe = conn.execute("SELECT contenido FROM recuerdos WHERE id=?", (identificador,)).fetchone()
                 if not existe:
                     return False
+                if existe[0] == contenido:
+                    return True
                 respaldo_memoria()
+                registrar_evento(conn, "actualizacion", identificador, existe[0], contenido)
                 conn.execute("UPDATE recuerdos SET contenido=? WHERE id=?", (contenido, identificador))
         try:
             collection.upsert(ids=[identificador], documents=[contenido],
@@ -631,7 +667,7 @@ def diagnostico(_auth=Depends(autorizar)):
     try:
         # La existencia de /data no demuestra que sea un volumen persistente.
         # Confirmar montaje y persistencia en Railway por separado.
-        return {"estado": "ok", "version": "3.4.2", "memorias": len(listar_recuerdos()),
+        return {"estado": "ok", "version": "3.5", "memorias": len(listar_recuerdos()),
                 "directorio_datos": DATA_DIR,
                 "directorio_escribible": os.access(DATA_DIR, os.W_OK),
                 "sqlite": os.path.exists(MEMORY_DB),
@@ -726,6 +762,64 @@ def evaluar_memoria_sin_guardar(peticion: PeticionEvaluacionMemoria,
                     "contenido_propuesto": fusionado, "cambios": False}
         return {"accion": "nuevo_o_sin_coincidencia_segura",
                 "cambios": False}
+
+
+@app.get("/memorias/historial", tags=["Auditoria"])
+def historial_memoria(limite: int = 50, _auth=Depends(autorizar)):
+    if not 1 <= limite <= 200:
+        raise HTTPException(status_code=422, detail="Limite entre 1 y 200")
+    with conectar_memoria() as conn:
+        filas = conn.execute("""SELECT evento_id, fecha, accion, recuerdo_id, anterior, nuevo, detalle
+            FROM auditoria_memoria ORDER BY evento_id DESC LIMIT ?""", (limite,)).fetchall()
+    return {"eventos": [dict(zip(("evento_id", "fecha", "accion", "recuerdo_id",
+                                  "anterior", "nuevo", "detalle"), fila)) for fila in filas]}
+
+
+class PeticionRestauracion(BaseModel):
+    evento_id: int = Field(ge=1)
+    confirmar: bool = False
+
+
+@app.post("/memorias/restaurar", tags=["Auditoria"])
+def restaurar_memoria(peticion: PeticionRestauracion, _auth=Depends(autorizar)):
+    """Revierte un evento solo si el estado actual coincide con el estado posterior al evento.
+
+    En fusiones con varios eventos, se restauran individualmente en orden inverso.
+    """
+    with MEMORY_LOCK:
+        with conectar_memoria() as conn:
+            evento = conn.execute("""SELECT accion, recuerdo_id, anterior, nuevo
+                FROM auditoria_memoria WHERE evento_id=?""", (peticion.evento_id,)).fetchone()
+            if evento is None:
+                raise HTTPException(status_code=404, detail="Evento no encontrado")
+            accion, rid, anterior, nuevo = evento
+            actual = conn.execute("SELECT contenido FROM recuerdos WHERE id=?", (rid,)).fetchone()
+            actual = actual[0] if actual else None
+            if actual != nuevo:
+                raise HTTPException(status_code=409, detail="El recuerdo cambio despues del evento; restauracion bloqueada")
+            if anterior is not None and not es_informacion_segura(anterior):
+                raise HTTPException(status_code=422, detail="El contenido anterior no supera la validacion")
+            if not peticion.confirmar:
+                return {"estado": "vista_previa", "evento_id": peticion.evento_id,
+                        "id": rid, "contenido_actual": actual, "contenido_a_restaurar": anterior,
+                        "cambios": False}
+            respaldo_memoria()
+            if anterior is None:
+                conn.execute("DELETE FROM recuerdos WHERE id=?", (rid,))
+            else:
+                conn.execute("""INSERT INTO recuerdos (id, contenido) VALUES (?, ?)
+                    ON CONFLICT(id) DO UPDATE SET contenido=excluded.contenido""", (rid, anterior))
+            registrar_evento(conn, "restauracion", rid, actual, anterior,
+                             "Reversion del evento " + str(peticion.evento_id))
+        try:
+            if anterior is None:
+                collection.delete(ids=[rid])
+            else:
+                collection.upsert(ids=[rid], documents=[anterior],
+                                  metadatas=[{"tipo": "recuerdo_aprobado"}])
+        except Exception:
+            logger.warning("Restauracion SQLite correcta; sincronizacion Chroma pendiente")
+        return {"estado": "restaurado", "id": rid, "evento_id": peticion.evento_id}
 
 
 class PeticionChat(BaseModel):
@@ -831,6 +925,7 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
 
 
 
