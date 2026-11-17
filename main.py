@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.7.0")
+app = FastAPI(title="Aura Cloud Brain", version="3.8.0")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -897,7 +897,7 @@ def diagnostico(_auth=Depends(autorizar)):
     try:
         # La existencia de /data no demuestra que sea un volumen persistente.
         # Confirmar montaje y persistencia en Railway por separado.
-        return {"estado": "ok", "version": "3.7.0", "memorias": len(listar_recuerdos()),
+        return {"estado": "ok", "version": "3.8.0", "memorias": len(listar_recuerdos()),
                 "directorio_datos": DATA_DIR,
                 "directorio_escribible": os.access(DATA_DIR, os.W_OK),
                 "sqlite": os.path.exists(MEMORY_DB),
@@ -993,6 +993,37 @@ def evaluar_memoria_sin_guardar(peticion: PeticionEvaluacionMemoria,
                     "contenido_propuesto": fusionado, "cambios": False}
         return {"accion": "nuevo_o_sin_coincidencia_segura",
                 "cambios": False}
+
+
+class PeticionAnalisisInteligente(BaseModel):
+    texto: str = Field(min_length=5, max_length=10000)
+
+
+@app.post("/memorias/analizar", tags=["Memoria inteligente"])
+def analizar_memoria_inteligente(peticion: PeticionAnalisisInteligente,
+                               _auth=Depends(autorizar)):
+    """Vista previa: clasifica candidatos sin modificar SQLite ni Chroma."""
+    mensaje = peticion.texto.strip()
+    if not es_informacion_segura(mensaje):
+        return {"estado": "no_apto", "candidatos": [], "cambios": False}
+    existentes = listar_recuerdos()
+    resultados = []
+    for candidato in detectar_memorias_valiosas(mensaje):
+        if es_duplicado_similar(candidato, existentes):
+            resultados.append({"contenido": candidato, "accion": "duplicado"})
+            continue
+        rid = detectar_duplicado_semantico(candidato, existentes)
+        if rid:
+            resultados.append({"contenido": candidato, "accion": "duplicado_semantico", "id": rid})
+            continue
+        reemplazar = decidir_actualizacion(mensaje, candidato, existentes)
+        if reemplazar:
+            resultados.append({"contenido": candidato, "accion": "posible_actualizacion",
+                               "id": reemplazar, "requiere_confirmacion": True})
+        else:
+            resultados.append({"contenido": candidato, "accion": "posible_nuevo"})
+    return {"estado": "analizado", "candidatos": resultados, "cambios": False,
+            "nota": "Vista previa sin escrituras; los resultados de IA requieren revision."}
 
 
 @app.get("/memorias/historial", tags=["Auditoria"])
@@ -1158,6 +1189,7 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
 
 
 
