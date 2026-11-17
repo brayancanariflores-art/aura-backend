@@ -9,6 +9,7 @@ import sqlite3
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from openai import OpenAI
+import uvicorn
 
 app = FastAPI(title="Aura Cloud Brain", version="1.0")
 
@@ -194,3 +195,7 @@ def procesar_chat(peticion: PeticionChat):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
