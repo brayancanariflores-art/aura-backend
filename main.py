@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.4")
+app = FastAPI(title="Aura Cloud Brain", version="3.4.1")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -187,6 +187,22 @@ def respaldo_memoria():
     return destino
 
 
+def fusion_es_redundante(texto):
+    """Rechaza propuestas que reiteran la misma idea en varias oraciones."""
+    oraciones = [normalizar_recuerdo(x) for x in re.split(r"[.!?]+", texto)
+                 if len(x.strip()) > 12]
+    vacias = {"estoy", "tengo", "para", "sobre", "como", "cuyo", "crear",
+              "proyecto", "objetivo", "tiene", "llama", "desarrollando",
+              "desarrollar", "enfocado", "enfocada", "esta", "este"}
+    tokens = [{w for w in o.split() if len(w) > 3 and w not in vacias}
+              for o in oraciones]
+    for i, a in enumerate(tokens):
+        for b in tokens[i + 1:]:
+            if a and b and len(a & b) / min(len(a), len(b)) >= 0.72:
+                return True
+    return False
+
+
 def evaluar_fusion(nuevo, existentes):
     """Solo fusionar si un clasificador confirma equivalencia y preserva todos los hechos.
     Ante dudas o errores, mantener los recuerdos por separado.
@@ -234,6 +250,12 @@ def evaluar_fusion(nuevo, existentes):
                     if len(w) >= 5 and w not in stop}
         palabras_origen = palabras_clave(original) | palabras_clave(nuevo)
         if not palabras_origen.issubset(palabras_clave(fusionado)):
+            return None
+        # No permitir actualizaciones automaticas con oraciones redundantes.
+        if fusion_es_redundante(fusionado):
+            return None
+        # Una fusion debe aportar un cambio, no solo reescribir el recuerdo.
+        if normalizar_recuerdo(fusionado) == normalizar_recuerdo(original):
             return None
         return elegido, fusionado
     except Exception:
@@ -571,7 +593,7 @@ def diagnostico(_auth=Depends(autorizar)):
     try:
         # La existencia de /data no demuestra que sea un volumen persistente.
         # Confirmar montaje y persistencia en Railway por separado.
-        return {"estado": "ok", "version": "3.4", "memorias": len(listar_recuerdos()),
+        return {"estado": "ok", "version": "3.4.1", "memorias": len(listar_recuerdos()),
                 "directorio_datos": DATA_DIR,
                 "directorio_escribible": os.access(DATA_DIR, os.W_OK),
                 "sqlite": os.path.exists(MEMORY_DB),
@@ -767,6 +789,7 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
 
 
 
