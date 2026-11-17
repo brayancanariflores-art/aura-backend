@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.10.0")
+app = FastAPI(title="Aura Cloud Brain", version="3.11.0")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -598,7 +598,7 @@ def consultar_contexto(peticion: dict, _auth=Depends(autorizar)):
     if not isinstance(pregunta, str) or not 1 <= len(pregunta.strip()) <= 10000:
         raise HTTPException(status_code=422, detail="Se requiere texto entre 1 y 10000 caracteres")
     resultados = recuperar_contexto(pregunta.strip())
-    return {"estado": "ok", "version": "3.10.0", "recuerdos": resultados,
+    return {"estado": "ok", "version": "3.11.0", "recuerdos": resultados,
             "total": len(resultados), "cambios": False}
 
 
@@ -987,7 +987,7 @@ def diagnostico(_auth=Depends(autorizar)):
     try:
         # La existencia de /data no demuestra que sea un volumen persistente.
         # Confirmar montaje y persistencia en Railway por separado.
-        return {"estado": "ok", "version": "3.10.0", "memorias": len(listar_recuerdos()),
+        return {"estado": "ok", "version": "3.11.0", "memorias": len(listar_recuerdos()),
                 "directorio_datos": DATA_DIR,
                 "directorio_escribible": os.access(DATA_DIR, os.W_OK),
                 "sqlite": os.path.exists(MEMORY_DB),
@@ -1214,7 +1214,7 @@ def linea_tiempo(recuerdo_id: str, _auth=Depends(autorizar)):
         fila = conn.execute('SELECT contenido FROM recuerdos WHERE id=?', (recuerdo_id,)).fetchone()
     if not eventos and not fila:
         raise HTTPException(status_code=404, detail='Recuerdo no encontrado')
-    return {'estado': 'ok', 'version': '3.10.0', 'recuerdo_id': recuerdo_id,
+    return {'estado': 'ok', 'version': '3.11.0', 'recuerdo_id': recuerdo_id,
             'vigente': fila[0] if fila else None, 'eventos': eventos,
             'total': len(eventos), 'cambios': False,
             'zona_horaria': 'UTC'}
@@ -1234,10 +1234,115 @@ def comparar_versiones(recuerdo_id: str, evento_inicial: int, evento_final: int,
         raise HTTPException(status_code=404, detail='Eventos no encontrados para ese recuerdo')
     antes = estado_en_evento(recuerdo_id, evento_inicial)
     despues = estado_en_evento(recuerdo_id, evento_final)
-    return {'estado': 'ok', 'version': '3.10.0', 'recuerdo_id': recuerdo_id,
+    return {'estado': 'ok', 'version': '3.11.0', 'recuerdo_id': recuerdo_id,
             'evento_inicial': evento_inicial, 'evento_final': evento_final,
             'contenido_inicial': antes, 'contenido_final': despues,
             'diferente': antes != despues, 'cambios': False}
+
+
+# AURA 3.11: razonamiento temporal determinista y de solo lectura.
+# Se calculan cantidades solo si ambas versiones contienen un presupuesto
+# explicito y una unidad monetaria compatible.
+def extraer_presupuesto(texto):
+    if not isinstance(texto, str):
+        return None
+    patron = re.compile(
+        r"\bpresupuesto\b[^\n.!?]{0,110}?\b(?:de|es de|era de|a|en)\s*"
+        r"(?:USD\s*)?([0-9][0-9., ]{0,18})\s*"
+        r"(d[oó]lares|USD|euros|EUR)\b", re.I)
+    m = patron.search(texto)
+    if not m:
+        return None
+    numero = re.sub(r"\s+", "", m.group(1))
+    if not numero:
+        return None
+    # Interpretar separadores de miles y decimales de forma conservadora.
+    if ',' in numero and '.' in numero:
+        separador_decimal = ',' if numero.rfind(',') > numero.rfind('.') else '.'
+        separador_miles = '.' if separador_decimal == ',' else ','
+        numero = numero.replace(separador_miles, '').replace(separador_decimal, '.')
+    elif ',' in numero or '.' in numero:
+        sep = ',' if ',' in numero else '.'
+        partes = numero.split(sep)
+        if len(partes) > 2 and all(len(x) == 3 for x in partes[1:]):
+            numero = ''.join(partes)
+        elif len(partes) == 2 and len(partes[1]) == 3:
+            numero = ''.join(partes)
+        elif len(partes) == 2 and len(partes[1]) in (1, 2):
+            numero = partes[0] + '.' + partes[1]
+        else:
+            return None
+    try:
+        from decimal import Decimal, InvalidOperation
+        valor = Decimal(numero)
+        if not valor.is_finite() or valor < 0:
+            return None
+    except (InvalidOperation, ValueError):
+        return None
+    moneda = 'USD' if m.group(2).lower() in ('dólares', 'dolares', 'usd') else 'EUR'
+    return valor, moneda
+
+
+@app.get('/memorias/razonar/{recuerdo_id}', tags=['Razonamiento temporal'])
+def razonar_cambio_temporal(recuerdo_id: str, evento_inicial: int,
+                           evento_final: int, _auth=Depends(autorizar)):
+    """Explica cambios comprobados en auditoria sin modificar SQLite ni Chroma."""
+    comparacion = comparar_versiones(recuerdo_id, evento_inicial, evento_final)
+    with conectar_memoria() as conn:
+        filas = conn.execute("""SELECT evento_id, fecha, accion FROM auditoria_memoria
+            WHERE recuerdo_id=? AND evento_id IN (?, ?)""",
+            (recuerdo_id, evento_inicial, evento_final)).fetchall()
+    fechas = {fila[0]: {'fecha': fila[1], 'accion': fila[2]} for fila in filas}
+    antes = comparacion['contenido_inicial']
+    despues = comparacion['contenido_final']
+    respuesta = {
+        'estado': 'ok', 'version': '3.11.0', 'recuerdo_id': recuerdo_id,
+        'evento_inicial': evento_inicial, 'evento_final': evento_final,
+        'fecha_inicial_utc': fechas[evento_inicial]['fecha'],
+        'fecha_final_utc': fechas[evento_final]['fecha'],
+        'contenido_inicial': antes, 'contenido_final': despues,
+        'diferente': antes != despues, 'analisis_numerico': None,
+        'cambios': False, 'zona_horaria': 'UTC'
+    }
+    if antes is None or despues is None:
+        respuesta['explicacion'] = ('En uno de los eventos el recuerdo no existia. '
+                                    'No es posible calcular un cambio de presupuesto.')
+        return respuesta
+    if antes == despues:
+        respuesta['explicacion'] = 'No se detectaron cambios entre las versiones seleccionadas.'
+        return respuesta
+    presupuesto_antes = extraer_presupuesto(antes)
+    presupuesto_despues = extraer_presupuesto(despues)
+    if not presupuesto_antes or not presupuesto_despues:
+        respuesta['explicacion'] = ('Los textos son diferentes, pero no se identificaron '
+                                    'dos presupuestos numericos comparables.')
+        return respuesta
+    valor_antes, moneda_antes = presupuesto_antes
+    valor_despues, moneda_despues = presupuesto_despues
+    if moneda_antes != moneda_despues:
+        respuesta['explicacion'] = 'Los presupuestos utilizan monedas distintas; no se calcula la diferencia.'
+        return respuesta
+    from decimal import Decimal
+    diferencia = valor_despues - valor_antes
+    porcentaje = (diferencia / valor_antes * Decimal('100')) if valor_antes else None
+    def numero(v):
+        return float(v.quantize(Decimal('0.01')))
+    respuesta['analisis_numerico'] = {
+        'tipo': 'presupuesto', 'moneda': moneda_antes,
+        'valor_inicial': numero(valor_antes),
+        'valor_final': numero(valor_despues),
+        'diferencia': numero(diferencia),
+        'porcentaje_cambio': numero(porcentaje) if porcentaje is not None else None
+    }
+    sentido = 'aumento' if diferencia > 0 else 'disminuyo' if diferencia < 0 else 'no vario'
+    frase = (f'El presupuesto paso de {valor_antes} a {valor_despues} {moneda_antes}. '
+             f'La diferencia es {diferencia:+} {moneda_antes}')
+    if porcentaje is not None:
+        frase += f' ({porcentaje:+.2f} % respecto al valor inicial)'
+    else:
+        frase += ' (porcentaje no definido porque el valor inicial es cero)'
+    respuesta['explicacion'] = frase + f'. Evento final registrado en UTC: {fechas[evento_final]["fecha"]}.'
+    return respuesta
 
 
 def buscar_eventos_temporales(texto, limite=30):
@@ -1265,7 +1370,7 @@ def buscar_eventos_temporales(texto, limite=30):
 def consultar_memoria_temporal(peticion: PeticionConsultaTemporal,
                               _auth=Depends(autorizar)):
     eventos = buscar_eventos_temporales(peticion.texto, peticion.limite)
-    return {'estado': 'ok', 'version': '3.10.0', 'eventos': eventos,
+    return {'estado': 'ok', 'version': '3.11.0', 'eventos': eventos,
             'total': len(eventos), 'cambios': False, 'zona_horaria': 'UTC',
             'nota': 'Busqueda historica de solo lectura; verifica la pertinencia de los eventos.'}
 
@@ -1418,6 +1523,7 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
 
 
 
