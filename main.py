@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.3")
+app = FastAPI(title="Aura Cloud Brain", version="3.4")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -221,8 +221,19 @@ def evaluar_fusion(nuevo, existentes):
         original = next(x["contenido"] for x in opciones if x["id"] == elegido)
         # Guardarrail: nombres propios/numeros de ambas fuentes deben permanecer.
         def claves(texto):
-            return set(re.findall(r"\\b[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+\\b|\\b\\d+\\b", texto))
+            return set(re.findall(r"\b[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+\b|\b\d+\b", texto))
         if not (claves(original) | claves(nuevo)).issubset(claves(fusionado)):
+            return None
+        # La propuesta debe conservar el contenido sustancial de ambos textos.
+        def palabras_clave(texto):
+            stop = {"estoy", "tengo", "para", "sobre", "como", "cuyo", "crear",
+                    "proyecto", "objetivo", "tiene", "llama", "desarrollando",
+                    "herramientas", "inteligencia", "artificial", "empresas",
+                    "asistentes", "desarrollar", "favorito"}
+            return {w for w in normalizar_recuerdo(texto).split()
+                    if len(w) >= 5 and w not in stop}
+        palabras_origen = palabras_clave(original) | palabras_clave(nuevo)
+        if not palabras_origen.issubset(palabras_clave(fusionado)):
             return None
         return elegido, fusionado
     except Exception:
@@ -387,12 +398,13 @@ def actualizar_recuerdo(identificador, contenido):
     if not es_informacion_segura(contenido):
         return False
     try:
-        with conectar_memoria() as conn:
-            existe = conn.execute("SELECT 1 FROM recuerdos WHERE id=?", (identificador,)).fetchone()
-            if not existe:
-                return False
-            respaldo_memoria()
-            conn.execute("UPDATE recuerdos SET contenido=? WHERE id=?", (contenido, identificador))
+        with MEMORY_LOCK:
+            with conectar_memoria() as conn:
+                existe = conn.execute("SELECT 1 FROM recuerdos WHERE id=?", (identificador,)).fetchone()
+                if not existe:
+                    return False
+                respaldo_memoria()
+                conn.execute("UPDATE recuerdos SET contenido=? WHERE id=?", (contenido, identificador))
         try:
             collection.upsert(ids=[identificador], documents=[contenido],
                               metadatas=[{"tipo": "recuerdo_aprobado"}])
@@ -559,11 +571,13 @@ def diagnostico(_auth=Depends(autorizar)):
     try:
         # La existencia de /data no demuestra que sea un volumen persistente.
         # Confirmar montaje y persistencia en Railway por separado.
-        return {"estado": "ok", "version": "3.3", "memorias": len(listar_recuerdos()),
+        return {"estado": "ok", "version": "3.4", "memorias": len(listar_recuerdos()),
                 "directorio_datos": DATA_DIR,
                 "directorio_escribible": os.access(DATA_DIR, os.W_OK),
                 "sqlite": os.path.exists(MEMORY_DB),
                 "chroma_documentos": collection.count(),
+                "fusion_automatica": "habilitada_si_openai_disponible",
+                "proteccion_duplicados": "activa",
                 "autenticacion_configurada": bool(AURA_ACCESS_TOKEN),
                 "persistencia_railway": "requiere verificar volumen montado y reinicio"}
     except Exception:
@@ -625,6 +639,30 @@ def descargar_respaldo_memoria(_auth=Depends(autorizar)):
             os.unlink(ruta_temporal)
         logger.exception("No se pudo generar el respaldo descargable")
         raise HTTPException(status_code=500, detail="No se pudo crear el respaldo")
+
+class PeticionEvaluacionMemoria(BaseModel):
+    texto: str = Field(min_length=5, max_length=350)
+
+
+@app.post("/memorias/evaluar", tags=["Memoria inteligente"])
+def evaluar_memoria_sin_guardar(peticion: PeticionEvaluacionMemoria,
+                               _auth=Depends(autorizar)):
+    """Previsualiza una propuesta sin escribir ni borrar recuerdos."""
+    contenido = peticion.texto.strip()
+    if not es_informacion_segura(contenido):
+        raise HTTPException(status_code=422, detail="Contenido no permitido")
+    with MEMORY_LOCK:
+        actuales = listar_recuerdos()
+        if es_duplicado_similar(contenido, actuales):
+            return {"accion": "duplicado", "cambios": False}
+        propuesta = evaluar_fusion(contenido, actuales)
+        if propuesta:
+            rid, fusionado = propuesta
+            return {"accion": "fusion_propuesta", "id": rid,
+                    "contenido_propuesto": fusionado, "cambios": False}
+        return {"accion": "nuevo_o_sin_coincidencia_segura",
+                "cambios": False}
+
 
 class PeticionChat(BaseModel):
     texto: str = Field(min_length=1, max_length=10000)
@@ -729,6 +767,7 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
 
 
 
