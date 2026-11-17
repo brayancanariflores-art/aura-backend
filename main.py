@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.9.0")
+app = FastAPI(title="Aura Cloud Brain", version="3.9.1")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -512,37 +512,64 @@ def tokens_contextuales(texto):
             if len(p) >= 3 and p not in PALABRAS_COMUNES}
 
 
-def recuperar_contexto(pregunta, limite=8):
-    """Relaciona recuerdos por terminos distintivos; SQLite es fuente de verdad.
+def entidades_de_proyecto(texto):
+    """Extrae nombres de proyectos escritos como secuencias de nombres propios.
 
-    La busqueda vectorial complementa los resultados, pero no autoriza
-    mezclar proyectos ni modifica los datos persistidos.
+    No interpreta palabras genericas (proyecto, presupuesto, etc.) como nombres.
+    """
+    patron = r"\b(?:[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+|[A-ZÁÉÍÓÚÑ]{2,})(?:\s+(?:[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+|[A-ZÁÉÍÓÚÑ]{2,}|\d+)){1,4}\b"
+    excluidas = {"mi", "el", "la", "los", "las", "estoy", "tengo", "presupuesto", "objetivo", "recuerda"}
+    entidades = set()
+    for coincidencia in re.finditer(patron, texto):
+        palabras = normalizar_recuerdo(coincidencia.group()).split()
+        while palabras and palabras[0] in excluidas:
+            palabras.pop(0)
+        if len(palabras) >= 2:
+            entidades.add(" ".join(palabras))
+    return entidades
+
+
+def recuperar_contexto(pregunta, limite=8):
+    """Recupera recuerdos vigentes sin mezclar proyectos con nombre explicito.
+
+    SQLite sigue siendo la fuente de verdad. No se escribe ningun recuerdo.
     """
     limite = max(1, min(int(limite), 20))
     recuerdos = listar_recuerdos()
     if not recuerdos:
         return []
+
+    entidades_conocidas = set()
+    for _, contenido in recuerdos:
+        entidades_conocidas.update(entidades_de_proyecto(contenido))
+    pregunta_normalizada = " " + normalizar_recuerdo(pregunta) + " "
+    mencionadas = {nombre for nombre in entidades_conocidas
+                   if " " + nombre + " " in pregunta_normalizada}
+    # Priorizar el nombre mas especifico si otro es un fragmento del mismo.
+    mencionadas = {nombre for nombre in mencionadas
+                   if not any(nombre != otro and " " + nombre + " " in " " + otro + " "
+                              for otro in mencionadas)}
+
     terminos = tokens_contextuales(pregunta)
     puntuaciones = {}
     for rid, contenido in recuerdos:
+        contenido_normalizado = " " + normalizar_recuerdo(contenido) + " "
+        nombres_recuerdo = entidades_de_proyecto(contenido)
+        if mencionadas:
+            # Un recuerdo de otro proyecto no debe entrar por coincidencias genericas.
+            if not any(" " + nombre + " " in contenido_normalizado for nombre in mencionadas):
+                continue
+            # Los recuerdos con nombres distintos no deben mezclarse.
+            if any(nombre not in mencionadas for nombre in nombres_recuerdo
+                   if nombre in entidades_conocidas and nombre not in mencionadas):
+                continue
         coincidencias = terminos & tokens_contextuales(contenido)
-        if coincidencias:
-            puntuaciones[rid] = len(coincidencias) * 10
+        if coincidencias or mencionadas:
+            puntuaciones[rid] = len(coincidencias) * 10 + (100 if mencionadas else 0)
 
-    # Solo ampliar a recuerdos que compartan terminos distintivos con
-    # los resultados directos; nunca usar la categoria general como vinculo.
-    if puntuaciones:
-        relacionados = set()
-        for rid, contenido in recuerdos:
-            if rid in puntuaciones:
-                relacionados.update(tokens_contextuales(contenido))
-        for rid, contenido in recuerdos:
-            if rid not in puntuaciones and terminos and (tokens_contextuales(contenido) & terminos):
-                puntuaciones[rid] = 5
-
-    # La similitud vectorial solo sirve como alternativa cuando no existe
-    # coincidencia textual; puede contener resultados no relacionados.
-    if not puntuaciones:
+    # Solo usar Chroma como alternativa cuando no hay nombre explicito ni
+    # coincidencia textual. Nunca se consideran documentos ausentes de SQLite.
+    if not puntuaciones and not mencionadas:
         try:
             if collection.count() > 0:
                 encontrados = collection.query(query_texts=[pregunta], n_results=min(3, collection.count()))
@@ -556,7 +583,9 @@ def recuperar_contexto(pregunta, limite=8):
     orden = {rid: i for i, (rid, _) in enumerate(recuerdos)}
     seleccion = sorted(puntuaciones, key=lambda rid: (-puntuaciones[rid], orden[rid]))[:limite]
     actuales = dict(recuerdos)
-    return [{"id": rid, "contenido": actuales[rid], "categoria": categoria_recuerdo(actuales[rid]), "puntuacion": puntuaciones[rid]} for rid in seleccion]
+    return [{"id": rid, "contenido": actuales[rid],
+             "categoria": categoria_recuerdo(actuales[rid]),
+             "puntuacion": puntuaciones[rid]} for rid in seleccion]
 
 
 def buscar_recuerdos(pregunta):
@@ -569,7 +598,7 @@ def consultar_contexto(peticion: dict, _auth=Depends(autorizar)):
     if not isinstance(pregunta, str) or not 1 <= len(pregunta.strip()) <= 10000:
         raise HTTPException(status_code=422, detail="Se requiere texto entre 1 y 10000 caracteres")
     resultados = recuperar_contexto(pregunta.strip())
-    return {"estado": "ok", "version": "3.9.0", "recuerdos": resultados,
+    return {"estado": "ok", "version": "3.9.1", "recuerdos": resultados,
             "total": len(resultados), "cambios": False}
 
 
@@ -958,7 +987,7 @@ def diagnostico(_auth=Depends(autorizar)):
     try:
         # La existencia de /data no demuestra que sea un volumen persistente.
         # Confirmar montaje y persistencia en Railway por separado.
-        return {"estado": "ok", "version": "3.9.0", "memorias": len(listar_recuerdos()),
+        return {"estado": "ok", "version": "3.9.1", "memorias": len(listar_recuerdos()),
                 "directorio_datos": DATA_DIR,
                 "directorio_escribible": os.access(DATA_DIR, os.W_OK),
                 "sqlite": os.path.exists(MEMORY_DB),
@@ -1253,6 +1282,7 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
 
 
 
