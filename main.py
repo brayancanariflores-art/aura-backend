@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import sqlite3
+import tempfile
 import uuid
 import urllib.parse
 import urllib.request
@@ -16,6 +17,8 @@ from html import unescape
 import chromadb
 import uvicorn
 from fastapi import FastAPI, HTTPException, Depends
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from openai import (
     APIConnectionError,
@@ -465,6 +468,43 @@ def diagnostico(_auth=Depends(autorizar)):
         raise HTTPException(status_code=500, detail="No se pudo consultar el diagnostico")
 
 
+
+@app.get("/backup/memoria", tags=["Respaldo"])
+def descargar_respaldo_memoria(_auth=Depends(autorizar)):
+    """Descarga una instantanea consistente de los recuerdos en SQLite."""
+    ruta_temporal = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="aura_backup_", suffix=".db", delete=False
+        ) as archivo:
+            ruta_temporal = archivo.name
+
+        # SQLite backup API crea una copia consistente incluso con la BD en uso.
+        with sqlite3.connect(MEMORY_DB, timeout=30) as origen:
+            with sqlite3.connect(ruta_temporal, timeout=30) as destino:
+                origen.backup(destino)
+                integridad = destino.execute("PRAGMA integrity_check").fetchone()[0]
+                if integridad != "ok":
+                    raise sqlite3.DatabaseError("El respaldo no paso la prueba de integridad")
+                cantidad = destino.execute("SELECT COUNT(*) FROM recuerdos").fetchone()[0]
+
+        fecha = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        return FileResponse(
+            path=ruta_temporal,
+            filename=f"aura_memories_backup_{fecha}.db",
+            media_type="application/octet-stream",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Aura-Recuerdos": str(cantidad),
+            },
+            background=BackgroundTask(os.unlink, ruta_temporal),
+        )
+    except Exception:
+        if ruta_temporal and os.path.exists(ruta_temporal):
+            os.unlink(ruta_temporal)
+        logger.exception("No se pudo generar el respaldo descargable")
+        raise HTTPException(status_code=500, detail="No se pudo crear el respaldo")
+
 class PeticionChat(BaseModel):
     texto: str = Field(min_length=1, max_length=10000)
 
@@ -568,6 +608,7 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
 
 
 
