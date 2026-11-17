@@ -1,5 +1,6 @@
 import json
 import hmac
+from difflib import SequenceMatcher
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,7 +30,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.1")
+app = FastAPI(title="Aura Cloud Brain", version="3.2")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -134,6 +135,30 @@ def es_informacion_segura(contenido):
     return True
 
 
+def normalizar_recuerdo(texto):
+    """Normaliza diferencias superficiales sin alterar el dato original."""
+    import unicodedata
+    texto = unicodedata.normalize("NFKD", texto.casefold())
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    return " ".join(re.findall(r"\w+", texto))
+
+
+def es_duplicado_similar(contenido, existentes):
+    """Filtro conservador: solo elimina repeticiones casi literales.
+
+    No interpreta hechos diferentes como equivalentes ni actualiza recuerdos.
+    """
+    nuevo = normalizar_recuerdo(contenido)
+    for _, previo in existentes:
+        anterior = normalizar_recuerdo(previo)
+        if nuevo == anterior:
+            return True
+        if min(len(nuevo), len(anterior)) >= 35:
+            if SequenceMatcher(None, nuevo, anterior).ratio() >= 0.94:
+                return True
+    return False
+
+
 def guardar_recuerdo(contenido):
     contenido = contenido.strip()
     if not es_informacion_segura(contenido):
@@ -142,7 +167,9 @@ def guardar_recuerdo(contenido):
         existe = conn.execute(
             "SELECT 1 FROM recuerdos WHERE lower(contenido)=lower(?)", (contenido,)
         ).fetchone()
-        if existe:
+        if existe or es_duplicado_similar(contenido, conn.execute(
+            "SELECT id, contenido FROM recuerdos"
+        ).fetchall()):
             return True
         identificador = MEMORY_PREFIX + uuid.uuid4().hex
         conn.execute("INSERT INTO recuerdos (id, contenido) VALUES (?, ?)",
@@ -358,7 +385,7 @@ def web_search(query):
         return "La consulta de busqueda esta vacia."
     try:
         query_lower = query.lower()
-        city = "Elizabeth"
+        city = ""
         words = query.split()
         words_lower = [word.lower() for word in words]
         if "en" in words_lower:
@@ -367,6 +394,8 @@ def web_search(query):
                 city = words[idx + 1].strip("?.!,")
 
         if any(term in query_lower for term in ("clima", "tiempo", "temperatura")):
+            if not city:
+                return "Indica la ciudad para consultar el clima."
             weather_url = f"https://wttr.in/{urllib.parse.quote(city)}?format=j1"
             req = urllib.request.Request(weather_url, headers={"User-Agent": "AuraCloudBrain/1.1"})
             with urllib.request.urlopen(req, timeout=10) as resp:
@@ -422,9 +451,15 @@ def leer_raiz():
 @app.get("/diagnostico")
 def diagnostico(_auth=Depends(autorizar)):
     try:
-        return {"estado": "ok", "version": "3.1", "memorias": len(listar_recuerdos()),
-                "volume": DATA_DIR, "sqlite": os.path.exists(MEMORY_DB),
-                "chroma": "disponible", "autenticacion": bool(AURA_ACCESS_TOKEN)}
+        # La existencia de /data no demuestra que sea un volumen persistente.
+        # Confirmar montaje y persistencia en Railway por separado.
+        return {"estado": "ok", "version": "3.2", "memorias": len(listar_recuerdos()),
+                "directorio_datos": DATA_DIR,
+                "directorio_escribible": os.access(DATA_DIR, os.W_OK),
+                "sqlite": os.path.exists(MEMORY_DB),
+                "chroma_documentos": collection.count(),
+                "autenticacion_configurada": bool(AURA_ACCESS_TOKEN),
+                "persistencia_railway": "requiere verificar volumen montado y reinicio"}
     except Exception:
         logger.exception("Fallo diagnostico")
         raise HTTPException(status_code=500, detail="No se pudo consultar el diagnostico")
@@ -533,6 +568,7 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
 
 
 
