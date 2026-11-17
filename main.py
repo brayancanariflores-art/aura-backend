@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.5")
+app = FastAPI(title="Aura Cloud Brain", version="3.6")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -128,6 +128,104 @@ def registrar_evento(conn, accion, rid, anterior=None, nuevo=None, detalle=""):
 
 
 inicializar_auditoria()
+
+
+# AURA 3.6: propuestas persistentes y confirmacion explicita.
+def inicializar_propuestas():
+    with conectar_memoria() as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS propuestas_memoria (
+            id TEXT PRIMARY KEY,
+            recuerdo_id TEXT NOT NULL,
+            anterior TEXT NOT NULL,
+            nuevo TEXT NOT NULL,
+            estado TEXT NOT NULL DEFAULT 'pendiente',
+            creado TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
+
+
+inicializar_propuestas()
+
+
+def crear_propuesta(rid, nuevo):
+    if not es_informacion_segura(nuevo):
+        return None
+    with MEMORY_LOCK:
+        with conectar_memoria() as conn:
+            fila = conn.execute("SELECT contenido FROM recuerdos WHERE id=?", (rid,)).fetchone()
+            if not fila or fila[0] == nuevo:
+                return None
+            existente = conn.execute("""SELECT id FROM propuestas_memoria
+                WHERE recuerdo_id=? AND anterior=? AND nuevo=? AND estado='pendiente'
+                LIMIT 1""", (rid, fila[0], nuevo)).fetchone()
+            if existente:
+                return existente[0]
+            pid = 'aura_propuesta_' + uuid.uuid4().hex
+            conn.execute("""INSERT INTO propuestas_memoria
+                (id, recuerdo_id, anterior, nuevo) VALUES (?, ?, ?, ?)""",
+                (pid, rid, fila[0], nuevo))
+            return pid
+
+
+class PeticionPropuesta(BaseModel):
+    recuerdo_id: str = Field(min_length=1, max_length=150)
+    nuevo: str = Field(min_length=5, max_length=350)
+
+
+class PeticionConfirmacion(BaseModel):
+    propuesta_id: str = Field(min_length=1, max_length=150)
+    confirmar: bool = False
+
+
+@app.post('/memorias/proponer', tags=['Memoria inteligente'])
+def proponer_cambio(peticion: PeticionPropuesta, _auth=Depends(autorizar)):
+    if not es_informacion_segura(peticion.nuevo):
+        raise HTTPException(status_code=422, detail='Contenido no permitido')
+    pid = crear_propuesta(peticion.recuerdo_id, peticion.nuevo.strip())
+    if pid is None:
+        raise HTTPException(status_code=409, detail='Recuerdo inexistente o sin cambios')
+    return {'estado': 'pendiente', 'propuesta_id': pid, 'cambios': False}
+
+
+@app.get('/memorias/propuestas', tags=['Memoria inteligente'])
+def ver_propuestas(_auth=Depends(autorizar)):
+    with conectar_memoria() as conn:
+        filas = conn.execute("""SELECT id, recuerdo_id, anterior, nuevo, creado
+            FROM propuestas_memoria WHERE estado='pendiente' ORDER BY creado DESC""").fetchall()
+    return {'propuestas': [dict(zip(('id', 'recuerdo_id', 'anterior', 'nuevo', 'creado'), f)) for f in filas]}
+
+
+@app.post('/memorias/confirmar', tags=['Memoria inteligente'])
+def confirmar_propuesta(peticion: PeticionConfirmacion, _auth=Depends(autorizar)):
+    with MEMORY_LOCK:
+        with conectar_memoria() as conn:
+            fila = conn.execute("""SELECT recuerdo_id, anterior, nuevo, estado
+                FROM propuestas_memoria WHERE id=?""", (peticion.propuesta_id,)).fetchone()
+            if not fila:
+                raise HTTPException(status_code=404, detail='Propuesta no encontrada')
+            rid, anterior, nuevo, estado = fila
+            if estado != 'pendiente':
+                raise HTTPException(status_code=409, detail='Propuesta ya procesada')
+            if not peticion.confirmar:
+                return {'estado': 'vista_previa', 'recuerdo_id': rid,
+                        'anterior': anterior, 'nuevo': nuevo, 'cambios': False}
+            actual = conn.execute('SELECT contenido FROM recuerdos WHERE id=?', (rid,)).fetchone()
+            if not actual or actual[0] != anterior:
+                raise HTTPException(status_code=409, detail='El recuerdo cambio; genera otra propuesta')
+            if not es_informacion_segura(nuevo):
+                raise HTTPException(status_code=422, detail='Contenido no permitido')
+            respaldo_memoria()
+            conn.execute('UPDATE recuerdos SET contenido=? WHERE id=? AND contenido=?',
+                         (nuevo, rid, anterior))
+            registrar_evento(conn, 'actualizacion_confirmada', rid, anterior, nuevo,
+                             'Propuesta ' + peticion.propuesta_id)
+            conn.execute("UPDATE propuestas_memoria SET estado='confirmada' WHERE id=?",
+                         (peticion.propuesta_id,))
+        try:
+            collection.upsert(ids=[rid], documents=[nuevo],
+                              metadatas=[{'tipo': 'recuerdo_aprobado'}])
+        except Exception:
+            logger.warning('Actualizacion confirmada en SQLite; Chroma pendiente')
+    return {'estado': 'confirmada', 'recuerdo_id': rid, 'cambios': True}
 
 # Copia local inicial de seguridad. Para respaldo externo, usa Backups de Railway.
 BACKUP_PATH = os.path.join(DATA_DIR, "aura_memories_pre_v3.db")
@@ -364,15 +462,7 @@ def guardar_recuerdo(contenido):
             return True
         if detectar_duplicado_semantico(contenido, existentes):
             return True
-        propuesta = evaluar_fusion(contenido, existentes)
-        if propuesta:
-            rid, texto = propuesta
-            # Evitar reescrituras si otro proceso altero el recuerdo durante la evaluación.
-            with conectar_memoria() as conn:
-                actual = conn.execute("SELECT contenido FROM recuerdos WHERE id=?", (rid,)).fetchone()
-            previo = dict(existentes).get(rid)
-            if actual and actual[0] == previo:
-                return actualizar_recuerdo(rid, texto)
+        # En 3.6 no fusionar ni sobrescribir recuerdos automaticamente.
         identificador = MEMORY_PREFIX + uuid.uuid4().hex
         with conectar_memoria() as conn:
             conn.execute("INSERT INTO recuerdos (id, contenido) VALUES (?, ?)",
@@ -523,8 +613,9 @@ def guardar_memorias_automaticas(mensaje):
             r"ya no se llama|reemplaz[ao]|sustitu[ií]|modifiqu[eé])\b",
             mensaje, re.I))
         reemplazar = decidir_actualizacion(mensaje, candidato, actuales) if hay_cambio else None
-        if reemplazar and actualizar_recuerdo(reemplazar, candidato):
-            guardados.append(candidato)
+        if reemplazar:
+            # Un cambio explicito se propone, nunca se aplica automaticamente.
+            crear_propuesta(reemplazar, candidato)
         elif guardar_recuerdo(candidato):
             guardados.append(candidato)
     return guardados
@@ -667,7 +758,7 @@ def diagnostico(_auth=Depends(autorizar)):
     try:
         # La existencia de /data no demuestra que sea un volumen persistente.
         # Confirmar montaje y persistencia en Railway por separado.
-        return {"estado": "ok", "version": "3.5", "memorias": len(listar_recuerdos()),
+        return {"estado": "ok", "version": "3.6", "memorias": len(listar_recuerdos()),
                 "directorio_datos": DATA_DIR,
                 "directorio_escribible": os.access(DATA_DIR, os.W_OK),
                 "sqlite": os.path.exists(MEMORY_DB),
@@ -925,6 +1016,7 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
 
 
 
