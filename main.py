@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.8.0")
+app = FastAPI(title="Aura Cloud Brain", version="3.8.1")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -258,6 +258,17 @@ def es_informacion_segura(contenido):
     if PATRON_SECRETO.search(contenido):
         return False
     if re.search(r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}|\b\d{9,}\b", contenido):
+        return False
+    return True
+
+
+def es_mensaje_analizable(texto):
+    """Valida mensajes de entrada; los recuerdos extraidos se validan aparte."""
+    if not isinstance(texto, str) or not 5 <= len(texto.strip()) <= 10000:
+        return False
+    if PATRON_SECRETO.search(texto):
+        return False
+    if re.search(r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}|\b\d{9,}\b", texto):
         return False
     return True
 
@@ -528,7 +539,7 @@ def buscar_recuerdos(pregunta):
 
 def detectar_memorias_valiosas(mensaje):
     """Extrae hechos duraderos; nunca ejecuta instrucciones del texto analizado."""
-    if ai_client is None or not es_informacion_segura(mensaje):
+    if ai_client is None or not es_mensaje_analizable(mensaje):
         return []
     try:
         respuesta = ai_client.chat.completions.create(
@@ -897,7 +908,7 @@ def diagnostico(_auth=Depends(autorizar)):
     try:
         # La existencia de /data no demuestra que sea un volumen persistente.
         # Confirmar montaje y persistencia en Railway por separado.
-        return {"estado": "ok", "version": "3.8.0", "memorias": len(listar_recuerdos()),
+        return {"estado": "ok", "version": "3.8.1", "memorias": len(listar_recuerdos()),
                 "directorio_datos": DATA_DIR,
                 "directorio_escribible": os.access(DATA_DIR, os.W_OK),
                 "sqlite": os.path.exists(MEMORY_DB),
@@ -1004,7 +1015,7 @@ def analizar_memoria_inteligente(peticion: PeticionAnalisisInteligente,
                                _auth=Depends(autorizar)):
     """Vista previa: clasifica candidatos sin modificar SQLite ni Chroma."""
     mensaje = peticion.texto.strip()
-    if not es_informacion_segura(mensaje):
+    if not es_mensaje_analizable(mensaje):
         return {"estado": "no_apto", "candidatos": [], "cambios": False}
     existentes = listar_recuerdos()
     resultados = []
@@ -1023,7 +1034,10 @@ def analizar_memoria_inteligente(peticion: PeticionAnalisisInteligente,
         else:
             resultados.append({"contenido": candidato, "accion": "posible_nuevo"})
     return {"estado": "analizado", "candidatos": resultados, "cambios": False,
-            "nota": "Vista previa sin escrituras; los resultados de IA requieren revision."}
+            "nota": "Vista previa sin escrituras; los resultados de IA requieren revision.",
+            "diagnostico": ("sin_cliente_openai" if ai_client is None else
+                            "sin_hechos_extraibles_o_error_ia" if not resultados else
+                            "candidatos_detectados")}
 
 
 @app.get("/memorias/historial", tags=["Auditoria"])
@@ -1189,6 +1203,7 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
 
 
 
