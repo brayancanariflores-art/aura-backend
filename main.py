@@ -14,7 +14,8 @@ from html import unescape
 
 import chromadb
 import uvicorn
-from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from openai import (
     APIConnectionError,
     APIStatusError,
@@ -28,20 +29,25 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.0")
+app = FastAPI(title="Aura Cloud Brain", version="3.1")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
 HISTORY_DB = os.path.join(DATA_DIR, "chat_history.db")
 AURA_ACCESS_TOKEN = os.getenv("AURA_ACCESS_TOKEN", "").strip()
 if not AURA_ACCESS_TOKEN:
-    logger.warning("AURA_ACCESS_TOKEN no configurado: /chat es publico; configura el token antes de usar datos privados")
+    logger.warning("AURA_ACCESS_TOKEN no configurado: acceso privado deshabilitado")
 
-def autorizar(authorization: str | None = Header(default=None)):
-    if AURA_ACCESS_TOKEN:
-        expected = "Bearer " + AURA_ACCESS_TOKEN
-        if not authorization or not hmac.compare_digest(authorization, expected):
-            raise HTTPException(status_code=401, detail="Autorizacion requerida")
+security = HTTPBearer(auto_error=False)
+
+
+def autorizar(credentials: HTTPAuthorizationCredentials | None = Depends(security)):
+    if not AURA_ACCESS_TOKEN:
+        raise HTTPException(status_code=503, detail="Token de acceso no configurado")
+    if (credentials is None
+            or credentials.scheme.lower() != "bearer"
+            or not hmac.compare_digest(credentials.credentials, AURA_ACCESS_TOKEN)):
+        raise HTTPException(status_code=401, detail="Autorizacion requerida")
 
 
 # El cliente se crea solo si existe la clave; nunca mostrarla en los logs.
@@ -416,7 +422,7 @@ def leer_raiz():
 @app.get("/diagnostico")
 def diagnostico(_auth=Depends(autorizar)):
     try:
-        return {"estado": "ok", "version": "3.0", "memorias": len(listar_recuerdos()),
+        return {"estado": "ok", "version": "3.1", "memorias": len(listar_recuerdos()),
                 "volume": DATA_DIR, "sqlite": os.path.exists(MEMORY_DB),
                 "chroma": "disponible", "autenticacion": bool(AURA_ACCESS_TOKEN)}
     except Exception:
@@ -527,5 +533,6 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
 
 
