@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.8.2")
+app = FastAPI(title="Aura Cloud Brain", version="3.9.0")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -503,38 +503,74 @@ def eliminar_recuerdos():
         logger.warning("No se pudo limpiar el indice vectorial")
 
 
-def buscar_recuerdos(pregunta):
-    """Recupera recuerdos por coincidencia de términos y similitud semántica.
+# AURA 3.9: recuperacion contextual sin modificar recuerdos.
+PALABRAS_COMUNES = {"cual", "cuales", "como", "cuando", "donde", "sobre", "sabes", "tengo", "tiene", "para", "este", "esta", "estos", "estas", "proyecto", "proyectos", "recuerdo", "recuerdos", "memoria", "informacion", "dime", "todo", "quiero", "saber", "datos", "cuanto", "cuantos", "presupuesto", "objetivo", "fecha", "nombre"}
 
-    SQLite siempre determina qué contenido es válido. Los documentos huérfanos
-    de Chroma nunca se entregan al modelo.
+
+def tokens_contextuales(texto):
+    return {p for p in normalizar_recuerdo(texto).split()
+            if len(p) >= 3 and p not in PALABRAS_COMUNES}
+
+
+def recuperar_contexto(pregunta, limite=8):
+    """Relaciona recuerdos por terminos distintivos; SQLite es fuente de verdad.
+
+    La busqueda vectorial complementa los resultados, pero no autoriza
+    mezclar proyectos ni modifica los datos persistidos.
     """
+    limite = max(1, min(int(limite), 20))
     recuerdos = listar_recuerdos()
     if not recuerdos:
-        return ""
-    terminos = {p for p in normalizar_recuerdo(pregunta).split() if len(p) >= 4}
-    puntuados = []
+        return []
+    terminos = tokens_contextuales(pregunta)
+    puntuaciones = {}
     for rid, contenido in recuerdos:
-        palabras = set(normalizar_recuerdo(contenido).split())
-        puntos = len(terminos & palabras)
-        if puntos:
-            puntuados.append((puntos, rid))
-    puntuados.sort(key=lambda x: x[0], reverse=True)
-    ids = [rid for _, rid in puntuados[:5]]
-    # Recuperación semántica complementaria; no sustituye los hechos de SQLite.
-    try:
-        if collection.count() > 0:
-            resultado = collection.query(query_texts=[pregunta], n_results=min(5, collection.count()))
-            vigentes = dict(recuerdos)
-            for rid in (resultado.get("ids") or [[]])[0]:
-                if rid in vigentes and rid not in ids and len(ids) < 5:
-                    ids.append(rid)
-    except Exception:
-        logger.warning("Busqueda semantica no disponible; se usa busqueda textual")
-    if not ids and re.search(r"recuerd|memoria|proyecto|preferencia", pregunta, re.I):
-        ids = [rid for rid, _ in recuerdos[:5]]
+        coincidencias = terminos & tokens_contextuales(contenido)
+        if coincidencias:
+            puntuaciones[rid] = len(coincidencias) * 10
+
+    # Solo ampliar a recuerdos que compartan terminos distintivos con
+    # los resultados directos; nunca usar la categoria general como vinculo.
+    if puntuaciones:
+        relacionados = set()
+        for rid, contenido in recuerdos:
+            if rid in puntuaciones:
+                relacionados.update(tokens_contextuales(contenido))
+        for rid, contenido in recuerdos:
+            if rid not in puntuaciones and terminos and (tokens_contextuales(contenido) & terminos):
+                puntuaciones[rid] = 5
+
+    # La similitud vectorial solo sirve como alternativa cuando no existe
+    # coincidencia textual; puede contener resultados no relacionados.
+    if not puntuaciones:
+        try:
+            if collection.count() > 0:
+                encontrados = collection.query(query_texts=[pregunta], n_results=min(3, collection.count()))
+                vigentes = dict(recuerdos)
+                for rid in (encontrados.get("ids") or [[]])[0]:
+                    if rid in vigentes:
+                        puntuaciones[rid] = 1
+        except Exception:
+            logger.warning("Busqueda vectorial no disponible; solo SQLite")
+
+    orden = {rid: i for i, (rid, _) in enumerate(recuerdos)}
+    seleccion = sorted(puntuaciones, key=lambda rid: (-puntuaciones[rid], orden[rid]))[:limite]
     actuales = dict(recuerdos)
-    return "\n".join(actuales[rid] for rid in ids)
+    return [{"id": rid, "contenido": actuales[rid], "categoria": categoria_recuerdo(actuales[rid]), "puntuacion": puntuaciones[rid]} for rid in seleccion]
+
+
+def buscar_recuerdos(pregunta):
+    return "\n".join(item["contenido"] for item in recuperar_contexto(pregunta))
+
+
+@app.post("/memorias/contexto", tags=["Memoria contextual"])
+def consultar_contexto(peticion: dict, _auth=Depends(autorizar)):
+    pregunta = peticion.get("texto")
+    if not isinstance(pregunta, str) or not 1 <= len(pregunta.strip()) <= 10000:
+        raise HTTPException(status_code=422, detail="Se requiere texto entre 1 y 10000 caracteres")
+    resultados = recuperar_contexto(pregunta.strip())
+    return {"estado": "ok", "version": "3.9.0", "recuerdos": resultados,
+            "total": len(resultados), "cambios": False}
 
 
 def detectar_memorias_valiosas(mensaje):
@@ -922,7 +958,7 @@ def diagnostico(_auth=Depends(autorizar)):
     try:
         # La existencia de /data no demuestra que sea un volumen persistente.
         # Confirmar montaje y persistencia en Railway por separado.
-        return {"estado": "ok", "version": "3.8.2", "memorias": len(listar_recuerdos()),
+        return {"estado": "ok", "version": "3.9.0", "memorias": len(listar_recuerdos()),
                 "directorio_datos": DATA_DIR,
                 "directorio_escribible": os.access(DATA_DIR, os.W_OK),
                 "sqlite": os.path.exists(MEMORY_DB),
