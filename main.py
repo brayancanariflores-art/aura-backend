@@ -25,7 +25,7 @@ logger = logging.getLogger("aura")
 
 app = FastAPI(title="Aura Cloud Brain", version="1.1")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
-DATA_DIR = os.getenv("AURA_DATA_DIR", ".")
+DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
 HISTORY_DB = os.path.join(DATA_DIR, "chat_history.db")
 
@@ -251,3 +251,4 @@ def procesar_chat(peticion: PeticionChat):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
