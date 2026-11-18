@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.14.3")
+app = FastAPI(title="Aura Cloud Brain", version="3.14.4")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -1641,12 +1641,19 @@ def comando_tareas(pregunta):
 
     # Consultas de tareas de solo lectura. Incluye las completadas y evita
     # enviar estas solicitudes al modelo sin los datos de SQLite.
-    consulta_tareas = bool(re.search(
-        r"\b(?:tareas?|actividades)\b", texto, re.I)) and bool(re.search(
-        r"\b(?:muestra(?:me)?|mu[eé]strame|lista(?:me)?|listar|consulta(?:me)?|"
-        r"consultar|dime|cu[aá]les|cu[aá]ntas|qu[eé]|tenemos|hay|registradas?|"
-        r"pendientes?|completadas?|finalizadas?|terminadas?|estado)\b",
+    # Solo una consulta DIRECTA activa el listado. Las solicitudes de analisis,
+    # informes o planificacion deben llegar al modelo con contexto SQLite.
+    intencion_analitica = bool(re.search(
+        r"\b(?:analiza(?:r)?|an[aá]lisis|eval[uú]a(?:r)?|evaluaci[oó]n|"
+        r"informe|plan(?:ifica(?:r|ci[oó]n)?)?|propuesta|estrategia|"
+        r"recomienda|recomendaciones|organiza|organizar|prioridades|"
+        r"objetivos|resultados|semanas?|pr[oó]ximos?\s+\d+\s+d[ií]as)\b",
         texto, re.I))
+    consulta_tareas = bool(re.match(
+        r"^(?:mu[eé]strame|muestra(?:me)?|lista(?:me)?|listar|"
+        r"consulta(?:me)?|consultar|dime|cu[aá]les|cu[aá]ntas|"
+        r"qu[eé]\s+tareas|tenemos|hay)\b", texto, re.I)) and bool(re.search(
+        r"\b(?:tareas?|actividades)\b", texto, re.I)) and not intencion_analitica
     orden_de_escritura = bool(re.match(
         r"^(?:registra|registrar|crea|crear|agrega|agregar|anota|anotar|"
         r"guarda|guardar|marca|marcar|pon|poner|cambia|cambiar|"
@@ -1694,7 +1701,8 @@ def comando_tareas(pregunta):
 
     # Si existe intención de completar una tarea pero no se identificó
     # inequívocamente, no permitir que el modelo afirme haberla completado.
-    if re.search(r"\b(?:completad[ao]|termin[eé]|finalic[eé]|complet[eé])\b", texto, re.I) and re.search(
+    if re.match(r"^(?:marca(?:r)?|pon|poner|cambia(?:r)?|"
+                r"termin[eé]|finalic[eé]|complet[eé])\b", texto, re.I) and re.search(
             r"\b(?:tarea|actividad)\b", texto, re.I):
         return {"respuesta": ("Para completar una tarea, indícame su descripción exacta y el proyecto. "
                               "Por ejemplo: 'Marca como completada la tarea de revisar la planificación "
@@ -1735,7 +1743,7 @@ def comando_tareas(pregunta):
         respuesta = (f"Esa tarea ya está registrada en {proyecto} con estado {dato['estado']}."
                      if dato["duplicada"] else f"Guardé la tarea pendiente de {proyecto}: {descripcion}.")
         return {"respuesta": respuesta, "estado_tarea": dato["estado"], "tarea_id": dato["id"]}
-    if re.search(r"\b(?:qu[eé]\s+(?:tareas?\s+)?tenemos\s+pendientes?|"
+    if not intencion_analitica and re.search(r"\b(?:qu[eé]\s+(?:tareas?\s+)?tenemos\s+pendientes?|"
                  r"(?:lista|muestra|consulta)\s+(?:las\s+)?tareas|tareas\s+pendientes|"
                  r"cu[aá]l\s+es\s+(?:nuestra|la|mi)\s+(?:pr[oó]xima\s+)?tarea\s+pendiente)\b", texto, re.I):
         proyecto = proyecto_explicito(texto)
