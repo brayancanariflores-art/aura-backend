@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.14.6")
+app = FastAPI(title="Aura Cloud Brain", version="3.14.7")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -1656,6 +1656,39 @@ def comando_tarea_supervisada(pregunta):
     if es_propuesta and no_escribir and not re.match(
             r"^(?:autorizo|apruebo|confirmo)\b", normal):
         return None  # Planificacion de solo lectura con contexto SQLite.
+
+    # AURA 3.14.7: autorizacion explicita con nombre de proyecto y
+    # descripcion citada. Se procesa antes de las preguntas de existencia.
+    # No se infiere la descripcion de una propuesta previa ni se acepta
+    # una orden que niegue la escritura.
+    autorizacion_citada = re.match(
+        r"^(?:autorizo|apruebo|confirmo)\s+(?:expresamente\s+)?"
+        r"(?:el\s+registro|la\s+creacion|registrar|crear|guardar|agregar)\s+"
+        r"(?:de\s+)?(?:la\s+)?(?:tarea|actividad)\s+"
+        r"(?:que\s+acabas\s+de\s+proponer\s+)?"
+        r"(?:para|en|del|de)\s+(.+?)\s*[:：]\s*"
+        r'["“«]([^"”»]+)["”»]', texto, re.I | re.S)
+    if autorizacion_citada:
+        referencia, descripcion = autorizacion_citada.groups()
+        proyecto = proyecto_explicito(referencia)
+        if not proyecto:
+            return {"respuesta": "Indica un unico proyecto conocido para registrar la tarea.",
+                    "estado_tarea": "requiere_proyecto", "cambios": False}
+        descripcion = descripcion.strip().rstrip('.! ')
+        dato = guardar_tarea(proyecto, descripcion)
+        verificada = next((t for t in listar_tareas(proyecto, None)
+                           if t['id'] == dato['id']), None)
+        if not verificada:
+            return {"respuesta": "No pude verificar la tarea en SQLite; no confirmo el registro.",
+                    "estado_tarea": "no_verificada", "cambios": False}
+        respuesta = (f"La tarea '{verificada['descripcion']}' ya estaba registrada en "
+                     f"{proyecto} con estado {verificada['estado']}. No cree duplicados."
+                     if dato['duplicada'] else
+                     f"Registre y verifique en SQLite la tarea pendiente de "
+                     f"{proyecto}: {verificada['descripcion']}.")
+        return {"respuesta": respuesta, "estado_tarea": verificada['estado'],
+                "tarea_id": verificada['id'], "duplicada": dato['duplicada'],
+                "cambios": not dato['duplicada']}
 
     # Registro directo con descripcion citada y comprobacion de duplicados.
     # Debe preceder al detector de existencia: "si ya existe" es una
