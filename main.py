@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.14.8")
+app = FastAPI(title="Aura Cloud Brain", version="3.14.9")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -1648,6 +1648,14 @@ def consultar_tarea_contextual(pregunta):
     """
     texto = re.sub(r"^aura[, :]*\s*", "", pregunta.strip(), flags=re.I).strip()
     normal = normalizar_recuerdo(texto)
+    # AURA 3.14.9: las solicitudes de propuestas no son consultas de una tarea
+    # existente, aunque contengan palabras como "consulta" o "tarea".
+    # Esta ruta es de solo lectura; las escrituras siguen requiriendo
+    # autorizacion explicita en los manejadores de tareas.
+    if re.search(r"\b(?:prop[oó]n|propone|proponer|sugiere|sugerir|plantea|plantear|"
+                 r"recomienda|recomendar|dise[nñ]a|dise[nñ]ar)\b", normal) and re.search(
+            r"\b(?:nueva|nuevo|adicional|propuesta|actividad|tarea)\b", normal):
+        return None
     if not re.search(r"\b(?:tarea|actividad)\b", normal):
         return None
     if not re.search(r"\b(?:cual es el estado|que estado|estado actual|"
