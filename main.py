@@ -1468,6 +1468,136 @@ def resolver_referencia_proyecto(pregunta, historial):
     return None, False
 
 
+# AURA 3.13: tareas persistentes, separadas de recuerdos y del historial.
+TASK_DB = os.path.join(DATA_DIR, "aura_tasks.db")
+TASK_LOCK = threading.RLock()
+
+
+def conectar_tareas():
+    return sqlite3.connect(TASK_DB, timeout=10)
+
+
+def inicializar_tareas():
+    with conectar_tareas() as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS tareas (
+            id TEXT PRIMARY KEY,
+            proyecto TEXT NOT NULL,
+            descripcion TEXT NOT NULL,
+            estado TEXT NOT NULL DEFAULT 'pendiente',
+            creado TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            completado TEXT,
+            UNIQUE(proyecto, descripcion)
+        )""")
+
+
+inicializar_tareas()
+
+
+def proyecto_explicito(texto):
+    nombres = proyectos_mencionados(texto)
+    return nombres[0] if len(nombres) == 1 else None
+
+
+def guardar_tarea(proyecto, descripcion):
+    descripcion = descripcion.strip().rstrip(". ")
+    if not 5 <= len(descripcion) <= 350 or not es_informacion_segura(descripcion):
+        raise HTTPException(status_code=422, detail="Descripcion de tarea no permitida")
+    if proyecto not in NOMBRES_PROYECTOS:
+        raise HTTPException(status_code=422, detail="Proyecto no reconocido")
+    with TASK_LOCK:
+        with conectar_tareas() as conn:
+            fila = conn.execute("SELECT id, estado FROM tareas WHERE proyecto=? AND descripcion=? COLLATE NOCASE",
+                                (proyecto, descripcion)).fetchone()
+            if fila:
+                return {"id": fila[0], "estado": fila[1], "duplicada": True}
+            tid = "aura_task_" + uuid.uuid4().hex
+            conn.execute("INSERT INTO tareas(id, proyecto, descripcion) VALUES (?, ?, ?)",
+                         (tid, proyecto, descripcion))
+            return {"id": tid, "estado": "pendiente", "duplicada": False}
+
+
+def listar_tareas(proyecto=None, estado="pendiente"):
+    consulta = "SELECT id, proyecto, descripcion, estado, creado, completado FROM tareas WHERE 1=1"
+    parametros = []
+    if proyecto:
+        consulta += " AND proyecto=?"
+        parametros.append(proyecto)
+    if estado:
+        consulta += " AND estado=?"
+        parametros.append(estado)
+    consulta += " ORDER BY creado DESC, rowid DESC"
+    with conectar_tareas() as conn:
+        filas = conn.execute(consulta, parametros).fetchall()
+    claves = ("id", "proyecto", "descripcion", "estado", "creado", "completado")
+    return [dict(zip(claves, fila)) for fila in filas]
+
+
+class PeticionTarea(BaseModel):
+    proyecto: str = Field(min_length=2, max_length=100)
+    descripcion: str = Field(min_length=5, max_length=350)
+
+
+@app.post("/tareas", tags=["Tareas"])
+def crear_tarea_api(peticion: PeticionTarea, _auth=Depends(autorizar)):
+    dato = guardar_tarea(peticion.proyecto, peticion.descripcion)
+    return {"proyecto": peticion.proyecto, "descripcion": peticion.descripcion, **dato}
+
+
+@app.get("/tareas", tags=["Tareas"])
+def consultar_tareas_api(proyecto: str | None = None, estado: str = "pendiente", _auth=Depends(autorizar)):
+    if proyecto and proyecto not in NOMBRES_PROYECTOS:
+        raise HTTPException(status_code=422, detail="Proyecto no reconocido")
+    if estado not in ("pendiente", "completada", "todas"):
+        raise HTTPException(status_code=422, detail="Estado no valido")
+    tareas = listar_tareas(proyecto, None if estado == "todas" else estado)
+    return {"tareas": tareas, "total": len(tareas)}
+
+
+@app.post("/tareas/{tarea_id}/completar", tags=["Tareas"])
+def completar_tarea_api(tarea_id: str, _auth=Depends(autorizar)):
+    with TASK_LOCK:
+        with conectar_tareas() as conn:
+            fila = conn.execute("SELECT estado FROM tareas WHERE id=?", (tarea_id,)).fetchone()
+            if not fila:
+                raise HTTPException(status_code=404, detail="Tarea no encontrada")
+            if fila[0] == "completada":
+                return {"id": tarea_id, "estado": "completada", "cambios": False}
+            conn.execute("UPDATE tareas SET estado='completada', completado=CURRENT_TIMESTAMP WHERE id=?", (tarea_id,))
+    return {"id": tarea_id, "estado": "completada", "cambios": True}
+
+
+def comando_tareas(pregunta):
+    """Comandos conservadores: nunca inferir guardado o completado de frases ambiguas."""
+    texto = re.sub(r"^aura[, :]*\s*", "", pregunta.strip(), flags=re.I)
+    # Ej.: 'recuerda que nuestra próxima tarea en Proyecto Centinela es revisar su planificación'
+    patron = (r"^(?:recuerda que\s+)?(?:nuestra|mi|la)\s+"
+              r"(?:pr[oó]xima\s+)?tarea\s+(?:pendiente\s+)?"
+              r"(?:en|para|del)\s+(.+?)\s+es\s+(.+?)[.!]?$")
+    m = re.match(patron, texto, re.I | re.S)
+    if m:
+        proyecto = proyecto_explicito(m.group(1))
+        if not proyecto:
+            return {"respuesta": "Indica un único proyecto conocido para guardar la tarea.", "estado_tarea": "requiere_proyecto"}
+        descripcion = m.group(2).strip().rstrip(".!")
+        dato = guardar_tarea(proyecto, descripcion)
+        if dato["duplicada"]:
+            respuesta = f"Esa tarea ya está registrada en {proyecto} con estado {dato['estado']}."
+        else:
+            respuesta = f"Guardé la tarea pendiente de {proyecto}: {descripcion}."
+        return {"respuesta": respuesta, "estado_tarea": dato["estado"], "tarea_id": dato["id"]}
+    if re.search(r"\b(?:qu[eé]\s+(?:tareas?\s+)?tenemos\s+pendientes?|lista\s+(?:las\s+)?tareas|tareas\s+pendientes)\b", texto, re.I):
+        proyecto = proyecto_explicito(texto)
+        if not proyecto:
+            return {"respuesta": "¿De cuál proyecto quieres consultar las tareas pendientes?", "estado_tarea": "requiere_proyecto"}
+        tareas = listar_tareas(proyecto)
+        if not tareas:
+            respuesta = f"No hay tareas pendientes registradas para {proyecto}."
+        else:
+            respuesta = "Tareas pendientes de " + proyecto + ":\n" + "\n".join("- " + t["descripcion"] for t in tareas)
+        return {"respuesta": respuesta, "total_tareas": len(tareas)}
+    return None
+
+
 class PeticionChat(BaseModel):
     texto: str = Field(min_length=1, max_length=10000)
 
@@ -1477,6 +1607,11 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
     pregunta = peticion.texto.strip()
     if not pregunta:
         raise HTTPException(status_code=422, detail="El campo texto no puede estar vacio")
+    respuesta_tareas = comando_tareas(pregunta)
+    if respuesta_tareas is not None:
+        guardar_en_historial("user", pregunta)
+        guardar_en_historial("assistant", respuesta_tareas["respuesta"])
+        return respuesta_tareas
     temporal = responder_consulta_temporal(pregunta)
     if temporal is not None:
         return temporal
