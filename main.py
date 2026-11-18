@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.14.4")
+app = FastAPI(title="Aura Cloud Brain", version="3.14.5")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -1635,6 +1635,95 @@ def completar_tarea_por_chat(proyecto, descripcion):
             "estado_tarea": "completada", "tarea_id": tarea["id"], "cambios": True}
 
 
+def comando_tarea_supervisada(pregunta):
+    """Interpreta autorizaciones y verificaciones sin delegar hechos al LLM.
+
+    Ante instrucciones ambiguas, no escribe ni afirma que hubo cambios.
+    """
+    texto = re.sub(r"^aura[, :]*\s*", "", pregunta.strip(), flags=re.I).strip()
+    normal = normalizar_recuerdo(texto)
+    menciona_tarea = bool(re.search(r"\b(?:tarea|tareas|actividad|actividades)\b", normal))
+    if not menciona_tarea:
+        return None
+
+    # La negacion prevalece sobre los verbos incluidos en ella.
+    es_propuesta = bool(re.search(
+        r"\b(?:prepara|preparar|propone|proponer|elabora|elaborar|"
+        r"planifica|planificar|analiza|analizar|propuesta|plan de trabajo)\b", normal))
+    no_escribir = bool(re.search(
+        r"\b(?:no (?:registres|registrar|registra|crees|crear|guardes|guardar|modifiques|modificar)|"
+        r"sin (?:registrar|crear|guardar|modificar)|solo (?:presenta|propone))\b", normal))
+    if es_propuesta and no_escribir and not re.match(
+            r"^(?:autorizo|apruebo|confirmo)\b", normal):
+        return None  # Planificacion de solo lectura con contexto SQLite.
+
+    # Una pregunta de existencia siempre se responde desde SQLite.
+    verifica = bool(re.search(r"\b(?:esta registrada|esta registrado|existe|figura|"
+        r"se encuentra registrada|se encuentra registrado)\b", normal)) and bool(re.search(
+        r"\b(?:consulta|consultar|verifica|verificar|comprueba|comprobar|"
+        r"dime|confirma|confirmar|si|cual)\b", normal))
+    if verifica and not re.match(r"^(?:registra|crea|guarda|agrega)\b", normal):
+        proyecto = proyecto_explicito(texto)
+        if not proyecto:
+            return {"respuesta": "Indica un unico proyecto conocido para verificar la tarea.",
+                    "estado_tarea": "requiere_proyecto", "cambios": False}
+        # Extraer descripcion entre comillas, si existe.
+        quoted = re.search(r'["“«](.+?)["”»]', texto, re.S)
+        if not quoted:
+            return {"respuesta": "Para verificar una tarea concreta, escribe su descripcion entre comillas.",
+                    "estado_tarea": "requiere_descripcion", "cambios": False}
+        descripcion = quoted.group(1).strip().rstrip('.! ')
+        tareas = listar_tareas(proyecto, None)
+        coincidencias = [t for t in tareas if normalizar_recuerdo(t['descripcion']) == normalizar_recuerdo(descripcion)]
+        if coincidencias:
+            t = coincidencias[0]
+            return {"respuesta": f"Si, la tarea '{t['descripcion']}' esta registrada en {proyecto} con estado {t['estado']}.",
+                    "estado_tarea": "verificada", "tarea_id": t['id'], "cambios": False}
+        return {"respuesta": f"No, la tarea '{descripcion}' no esta registrada en {proyecto}.",
+                "estado_tarea": "no_encontrada", "cambios": False}
+
+    # Orden autorizada con descripcion exacta delimitada por dos puntos.
+    # No se permite crear nada si hay negacion de la accion principal.
+    autorizacion = re.match(
+        r"^(?:autorizo|apruebo|confirmo)\s+(?:aura\s+)?(?:a\s+)?"
+        r"(?:registrar|crear|guardar|agregar)\s+(?:[uú]nicamente|solo|solamente)?\s*"
+        r"(?:(?:esta|una|la|nueva)\s+)?(?:tarea|actividad)\s+(?:pendiente\s+)?"
+        r"(?:en|para|del)\s+(.+?)\s*[:：]\s*(.+)$", texto, re.I | re.S)
+    if autorizacion:
+        referencia, descripcion = autorizacion.groups()
+        proyecto = proyecto_explicito(referencia)
+        if not proyecto:
+            return {"respuesta": "Indica un unico proyecto conocido para registrar la tarea.",
+                    "estado_tarea": "requiere_proyecto", "cambios": False}
+        descripcion = re.split(r"\.\s+(?:No registres|No crees|No guardes)\b", descripcion, maxsplit=1, flags=re.I)[0]
+        descripcion = descripcion.strip().rstrip('.! ')
+        dato = guardar_tarea(proyecto, descripcion)
+        # Lectura independiente tras commit: confirmar persistencia real.
+        verificada = next((t for t in listar_tareas(proyecto, None) if t['id'] == dato['id']), None)
+        if not verificada:
+            return {"respuesta": "No pude verificar el registro en SQLite; no puedo confirmar la operacion.",
+                    "estado_tarea": "no_verificada", "cambios": False}
+        respuesta = (f"La tarea ya estaba registrada en {proyecto} con estado {verificada['estado']}."
+                     if dato['duplicada'] else
+                     f"Registre y verifique en SQLite la tarea pendiente de {proyecto}: {verificada['descripcion']}.")
+        return {"respuesta": respuesta, "estado_tarea": verificada['estado'],
+                "tarea_id": verificada['id'], "duplicada": dato['duplicada'],
+                "cambios": not dato['duplicada']}
+
+    # Autorizacion explicita en lenguaje libre: nunca fingir una escritura.
+    if re.match(r"^(?:autorizo|apruebo|confirmo)\b", normal) and re.search(
+        r"\b(?:registrar|crear|guardar|agregar)\b", normal):
+        return {"respuesta": ("No registre ninguna tarea: necesito el formato exacto "
+                "'Autorizo registrar una tarea en Proyecto Centinela: descripcion'."),
+                "estado_tarea": "requiere_formato", "cambios": False}
+
+    # Consultas sobre si una tarea existe sin descripcion entre comillas.
+    if verifica:
+        return {"respuesta": "Para verificar una tarea, escribe su descripcion exacta entre comillas.",
+                "estado_tarea": "requiere_descripcion", "cambios": False}
+    return None
+
+
 def comando_tareas(pregunta):
     """Comandos explícitos y verificables; las escrituras se confirman desde SQLite."""
     texto = re.sub(r"^aura[, :]*\s*", "", pregunta.strip(), flags=re.I).strip()
@@ -1765,11 +1854,22 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
     pregunta = peticion.texto.strip()
     if not pregunta:
         raise HTTPException(status_code=422, detail="El campo texto no puede estar vacio")
-    respuesta_tareas = comando_tareas(pregunta)
+    respuesta_tareas = comando_tarea_supervisada(pregunta)
+    if respuesta_tareas is None:
+        respuesta_tareas = comando_tareas(pregunta)
     if respuesta_tareas is not None:
         guardar_en_historial("user", pregunta)
         guardar_en_historial("assistant", respuesta_tareas["respuesta"])
         return respuesta_tareas
+    # Impide confirmaciones inventadas cuando una orden de escritura no fue entendida.
+    normal_pregunta = normalizar_recuerdo(pregunta)
+    if (re.search(r"\b(?:tarea|tareas|actividad|actividades)\b", normal_pregunta)
+            and re.match(r"^(?:aura )?(?:registra|registrar|crea|crear|guarda|guardar|"
+                         r"agrega|agregar|anota|anotar)\b", normal_pregunta)
+            and not re.search(r"\b(?:no registres|no registrar|no crees|sin registrar)\b", normal_pregunta)):
+        return {"respuesta": ("No registre ninguna tarea porque no pude interpretar la orden "
+                "con seguridad. Usa: 'Registra una tarea en Proyecto Centinela: descripcion'."),
+                "estado_tarea": "requiere_formato", "cambios": False}
     temporal = responder_consulta_temporal(pregunta)
     if temporal is not None:
         return temporal
