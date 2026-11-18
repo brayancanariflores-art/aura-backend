@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.18.0")
+app = FastAPI(title="Aura Cloud Brain", version="3.19.0")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -2361,7 +2361,7 @@ def consultar_historial_autonomia(proyecto: str, limite: int = 5, _auth=Depends(
     if not validado:
         raise HTTPException(status_code=422, detail="Proyecto no reconocido")
     registros = historial_autonomia(validado, limite)
-    return {"version": "3.18.0", "proyecto": validado,
+    return {"version": "3.19.0", "proyecto": validado,
             "total_devuelto": len(registros), "historial": registros}
 
 
@@ -2453,7 +2453,7 @@ def analizar_autonomia(peticion: PeticionAutonomia, _auth=Depends(autorizar)):
                 "estado": "propuesta_no_ejecutada",
             })
         return {
-            "version": "3.18.0", "modo": "analisis_autonomo_supervisado",
+            "version": "3.19.0", "modo": "analisis_autonomo_supervisado",
             "solo_lectura": True, "acciones_ejecutadas": 0,
             "diagnostico": str(plan.get("diagnostico", ""))[:2000],
             "propuestas": propuestas,
@@ -2476,7 +2476,7 @@ def analizar_autonomia(peticion: PeticionAutonomia, _auth=Depends(autorizar)):
         raise HTTPException(status_code=502, detail="El modelo devolvio un analisis no valido")
 
 
-# AURA 3.18.0: comparacion programatica de evidencia historica.
+# AURA 3.19.0: comparacion programatica de evidencia historica.
 # Solo lectura: no escribe en historial, tareas ni memorias.
 def comparar_propuestas_estructuradas(actuales, anteriores):
     """Compara referencias de tareas, sin confundir similitud con verdad semantica."""
@@ -2536,7 +2536,7 @@ def autoevaluar_autonomia(peticion: PeticionAutonomia, _auth=Depends(autorizar))
     anteriores = historial_autonomia(proyecto, 5)
     comparacion = comparar_propuestas_estructuradas(resultado["propuestas"], anteriores)
     return {
-        "version": "3.18.0",
+        "version": "3.19.0",
         "modo": "autoevaluacion_estructurada_supervisada",
         "solo_lectura": True,
         "acciones_ejecutadas": 0,
@@ -2548,7 +2548,7 @@ def autoevaluar_autonomia(peticion: PeticionAutonomia, _auth=Depends(autorizar))
     }
 
 
-# AURA 3.18.0: laboratorio de evidencias aislado, sin escrituras ni llamadas al modelo.
+# AURA 3.19.0: laboratorio de evidencias aislado, sin escrituras ni llamadas al modelo.
 # Los identificadores simulados NO se incorporan a tareas ni a historial.
 class PropuestaSimulada(BaseModel):
     titulo: str = Field(min_length=1, max_length=180)
@@ -2579,7 +2579,7 @@ def simular_comparacion_autonomia(peticion: PeticionSimulacionAutonomia,
                            "evidencia_ids": sorted(set(referencias))})
     comparacion = comparar_propuestas_estructuradas(propuestas, anteriores)
     return {
-        "version": "3.18.0",
+        "version": "3.19.0",
         "modo": "simulacion_aislada_de_evidencias",
         "proyecto": proyecto,
         "solo_lectura": True,
@@ -2594,7 +2594,7 @@ def simular_comparacion_autonomia(peticion: PeticionSimulacionAutonomia,
     }
 
 
-# AURA 3.18.0: revision semantica supervisada y aislada.
+# AURA 3.19.0: revision semantica supervisada y aislada.
 # NO modifica el historial ni las tareas; el juicio del LLM nunca se presenta como prueba.
 class ParAfirmaciones(BaseModel):
     afirmacion_anterior: str = Field(min_length=5, max_length=700)
@@ -2691,7 +2691,7 @@ def evaluar_semantica_autonomia(peticion: PeticionEvaluacionSemantica,
                 "requiere_revision_humana": True,
             })
         return {
-            "version": "3.18.0", "modo": "evaluacion_semantica_supervisada",
+            "version": "3.19.0", "modo": "evaluacion_semantica_supervisada",
             "proyecto": proyecto, "solo_lectura": True,
             "acciones_ejecutadas": 0, "acciones_sobre_tareas": 0,
             "analisis_guardados": 0,
@@ -2706,6 +2706,90 @@ def evaluar_semantica_autonomia(peticion: PeticionEvaluacionSemantica,
         logger.exception("Respuesta semantica invalida")
         raise HTTPException(status_code=502, detail="El modelo devolvio una evaluacion no valida")
 
+
+
+# AURA 3.19.0: comprobacion factual independiente contra SQLite.
+# Se usan identificadores y estados estructurados para evitar que el modelo
+# interprete libremente una frase y presente su interpretacion como un hecho.
+# Solo SELECT: no crea tablas, no registra analisis ni modifica tareas.
+class AfirmacionEstadoTarea(BaseModel):
+    tarea_id: str = Field(min_length=11, max_length=100, pattern=r"^aura_task_[a-f0-9]{32}$")
+    estado_afirmado: str = Field(pattern=r"^(pendiente|completada)$")
+
+
+class PeticionVerificarHechos(BaseModel):
+    proyecto: str = Field(min_length=2, max_length=100)
+    afirmaciones: list[AfirmacionEstadoTarea] = Field(min_length=1, max_length=20)
+
+
+def verificar_estados_sqlite(proyecto: str, afirmaciones: list[dict]):
+    """Comprueba estados en una transaccion de lectura coherente y acotada al proyecto.
+
+    No se revelan tareas de otros proyectos: ambas situaciones se informan como
+    'sin_registro_en_proyecto'. La consulta no utiliza el modelo generativo.
+    """
+    ids = sorted({a["tarea_id"] for a in afirmaciones})
+    marcadores = ",".join("?" for _ in ids)
+    # SQLite en modo solo lectura; URI evita crear una BD ausente por accidente.
+    ruta = Path(TASK_DB).resolve().as_uri() + "?mode=ro"
+    with sqlite3.connect(ruta, uri=True, timeout=10) as conn:
+        conn.execute("BEGIN")
+        filas = conn.execute(
+            f"SELECT id, descripcion, estado, creado, completado FROM tareas "
+            f"WHERE proyecto=? COLLATE NOCASE AND id IN ({marcadores})",
+            [proyecto, *ids],
+        ).fetchall()
+    reales = {fila[0]: {
+        "id": fila[0], "descripcion": fila[1], "estado": fila[2],
+        "creado": fila[3], "completado": fila[4],
+    } for fila in filas}
+    resultados = []
+    for indice, afirmacion in enumerate(afirmaciones):
+        tarea_id = afirmacion["tarea_id"]
+        estado_afirmado = afirmacion["estado_afirmado"]
+        registro = reales.get(tarea_id)
+        if registro is None:
+            veredicto = "sin_registro_en_proyecto"
+        elif registro["estado"] == estado_afirmado:
+            veredicto = "verificada"
+        else:
+            veredicto = "contradicha_por_sqlite"
+        resultados.append({
+            "indice": indice,
+            "tarea_id": tarea_id,
+            "estado_afirmado": estado_afirmado,
+            "veredicto": veredicto,
+            "evidencia_sqlite": registro,
+        })
+    return resultados
+
+
+@app.post("/autonomia/verificar_hechos", tags=["Autonomia"])
+def verificar_hechos_autonomia(peticion: PeticionVerificarHechos,
+                              _auth=Depends(autorizar)):
+    """Verificacion determinista de estados actuales de tareas; sin escrituras."""
+    proyecto = proyecto_validado(peticion.proyecto)
+    if not proyecto:
+        raise HTTPException(status_code=422, detail="Proyecto no reconocido")
+    afirmaciones = [a.model_dump() for a in peticion.afirmaciones]
+    resultados = verificar_estados_sqlite(proyecto, afirmaciones)
+    return {
+        "version": "3.19.0",
+        "modo": "verificacion_factual_sqlite",
+        "proyecto": proyecto,
+        "solo_lectura": True,
+        "acciones_ejecutadas": 0,
+        "acciones_sobre_tareas": 0,
+        "analisis_guardados": 0,
+        "total_verificado": len(resultados),
+        "verificaciones": resultados,
+        "limites": [
+            "Se verifica el estado almacenado en SQLite en el momento de la consulta.",
+            "No se infieren prioridades, dependencias ni veracidad de otras afirmaciones.",
+            "Un registro ausente en este proyecto no demuestra que la tarea no exista en otro.",
+            "Esta comprobacion no determina si el estado cambio en otro momento.",
+        ],
+    }
 
 @app.post("/chat")
 def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
