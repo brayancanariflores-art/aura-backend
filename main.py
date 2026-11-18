@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.14.0")
+app = FastAPI(title="Aura Cloud Brain", version="3.14.1")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -1593,9 +1593,81 @@ def completar_tarea_api(tarea_id: str, _auth=Depends(autorizar)):
     return {"id": tarea_id, "estado": "completada", "cambios": True}
 
 
+def completar_tarea_por_chat(proyecto, descripcion):
+    """Completa una sola tarea pendiente identificada sin ambiguedad.
+
+    Reutiliza la misma tabla SQLite que el endpoint /tareas; nunca delega
+    modificaciones de estado al modelo de lenguaje.
+    """
+    pendientes = listar_tareas(proyecto, "pendiente")
+    if not pendientes:
+        return {"respuesta": f"No hay tareas pendientes en {proyecto}.",
+                "estado_tarea": "sin_pendientes", "cambios": False}
+
+    def clave(texto):
+        texto = normalizar_recuerdo(texto)
+        texto = re.sub(r"^(?:la |el )?(?:tarea |actividad )?(?:de |del )?", "", texto)
+        return texto.strip()
+
+    buscada = clave(descripcion)
+    coincidencias = [t for t in pendientes if clave(t["descripcion"]) == buscada]
+    if not coincidencias:
+        return {"respuesta": (f"No encontré una tarea pendiente con esa descripción exacta "
+                              f"en {proyecto}. Consulta las tareas pendientes para confirmar su nombre."),
+                "estado_tarea": "no_encontrada", "cambios": False}
+    if len(coincidencias) != 1:
+        return {"respuesta": "Hay varias tareas coincidentes. Necesito que especifiques cuál completar.",
+                "estado_tarea": "ambigua", "cambios": False}
+
+    tarea = coincidencias[0]
+    # Operación atómica y condicionada: evita afirmar que hubo un cambio
+    # si otro proceso completó la tarea entre la consulta y la escritura.
+    with TASK_LOCK:
+        with conectar_tareas() as conn:
+            cursor = conn.execute(
+                "UPDATE tareas SET estado='completada', completado=CURRENT_TIMESTAMP "
+                "WHERE id=? AND estado='pendiente'", (tarea["id"],))
+            cambios = cursor.rowcount == 1
+    if not cambios:
+        return {"respuesta": "La tarea ya no estaba pendiente; no hice cambios.",
+                "estado_tarea": "sin_cambios", "tarea_id": tarea["id"], "cambios": False}
+    return {"respuesta": f"Marqué como completada la tarea de {proyecto}: {tarea['descripcion']}.",
+            "estado_tarea": "completada", "tarea_id": tarea["id"], "cambios": True}
+
+
 def comando_tareas(pregunta):
-    """Comandos explícitos y verificables, sin confirmar cambios no persistidos."""
-    texto = re.sub(r"^aura[, :]*\s*", "", pregunta.strip(), flags=re.I)
+    """Comandos explícitos y verificables; las escrituras se confirman desde SQLite."""
+    texto = re.sub(r"^aura[, :]*\s*", "", pregunta.strip(), flags=re.I).strip()
+
+    # Dar prioridad a completar tareas: el modelo nunca debe improvisar
+    # una respuesta sobre su capacidad de cambiar el estado.
+    orden_completar = re.match(
+        r"^(?:marca(?:r)?|marcar|pon|poner|cambia(?:r)?|cambiar)\s+"
+        r"(?:como\s+)?completad[ao]\s+(?:la\s+)?(?:tarea|actividad)\s+"
+        r"(?:de\s+)?(.+)\s+(?:en|del|de|para)\s+(.+?)[.!]?\s*$",
+        texto, re.I | re.S)
+    if not orden_completar:
+        orden_completar = re.match(
+            r"^(?:ya\s+)?(?:termin[eé]|finalic[eé]|complet[eé])\s+"
+            r"(?:la\s+)?(?:tarea|actividad)\s+(?:de\s+)?(.+)\s+"
+            r"(?:en|del|de|para)\s+(.+?)[.!]?\s*$", texto, re.I | re.S)
+    if orden_completar:
+        descripcion, referencia = orden_completar.groups()
+        proyecto = proyecto_explicito(referencia)
+        if not proyecto:
+            return {"respuesta": "Indica un único proyecto conocido para completar la tarea.",
+                    "estado_tarea": "requiere_proyecto", "cambios": False}
+        return completar_tarea_por_chat(proyecto, descripcion)
+
+    # Si existe intención de completar una tarea pero no se identificó
+    # inequívocamente, no permitir que el modelo afirme haberla completado.
+    if re.search(r"\b(?:completad[ao]|termin[eé]|finalic[eé]|complet[eé])\b", texto, re.I) and re.search(
+            r"\b(?:tarea|actividad)\b", texto, re.I):
+        return {"respuesta": ("Para completar una tarea, indícame su descripción exacta y el proyecto. "
+                              "Por ejemplo: 'Marca como completada la tarea de revisar la planificación "
+                              "del proyecto en Proyecto Centinela'."),
+                "estado_tarea": "requiere_aclaracion", "cambios": False}
+
     patron = (r"^(?:(?:recuerda|anota|guarda|registra)\s+que\s+)?"
               r"(?:(?:nuestra|mi|la)\s+)?(?:pr[oó]xima\s+)?tarea\s+"
               r"(?:pendiente\s+)?(?:en|para|del)\s+(.+?)\s+es\s+(.+?)[.!]?$" )
