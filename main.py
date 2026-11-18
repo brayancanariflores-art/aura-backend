@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.17.0")
+app = FastAPI(title="Aura Cloud Brain", version="3.17.1")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -2358,7 +2358,7 @@ def consultar_historial_autonomia(proyecto: str, limite: int = 5, _auth=Depends(
     if not validado:
         raise HTTPException(status_code=422, detail="Proyecto no reconocido")
     registros = historial_autonomia(validado, limite)
-    return {"version": "3.17.0", "proyecto": validado,
+    return {"version": "3.17.1", "proyecto": validado,
             "total_devuelto": len(registros), "historial": registros}
 
 
@@ -2450,7 +2450,7 @@ def analizar_autonomia(peticion: PeticionAutonomia, _auth=Depends(autorizar)):
                 "estado": "propuesta_no_ejecutada",
             })
         return {
-            "version": "3.17.0", "modo": "analisis_autonomo_supervisado",
+            "version": "3.17.1", "modo": "analisis_autonomo_supervisado",
             "solo_lectura": True, "acciones_ejecutadas": 0,
             "diagnostico": str(plan.get("diagnostico", ""))[:2000],
             "propuestas": propuestas,
@@ -2473,7 +2473,7 @@ def analizar_autonomia(peticion: PeticionAutonomia, _auth=Depends(autorizar)):
         raise HTTPException(status_code=502, detail="El modelo devolvio un analisis no valido")
 
 
-# AURA 3.17.0: comparacion programatica de evidencia historica.
+# AURA 3.17.1: comparacion programatica de evidencia historica.
 # Solo lectura: no escribe en historial, tareas ni memorias.
 def comparar_propuestas_estructuradas(actuales, anteriores):
     """Compara referencias de tareas, sin confundir similitud con verdad semantica."""
@@ -2533,7 +2533,7 @@ def autoevaluar_autonomia(peticion: PeticionAutonomia, _auth=Depends(autorizar))
     anteriores = historial_autonomia(proyecto, 5)
     comparacion = comparar_propuestas_estructuradas(resultado["propuestas"], anteriores)
     return {
-        "version": "3.17.0",
+        "version": "3.17.1",
         "modo": "autoevaluacion_estructurada_supervisada",
         "solo_lectura": True,
         "acciones_ejecutadas": 0,
@@ -2542,6 +2542,52 @@ def autoevaluar_autonomia(peticion: PeticionAutonomia, _auth=Depends(autorizar))
         "analisis_actual": resultado,
         "comparacion_programatica": comparacion,
         "aviso": "Comparacion estructural de evidencia, no prueba de contradicciones semanticas ni aprendizaje autonomo.",
+    }
+
+
+# AURA 3.17.1: laboratorio de evidencias aislado, sin escrituras ni llamadas al modelo.
+# Los identificadores simulados NO se incorporan a tareas ni a historial.
+class PropuestaSimulada(BaseModel):
+    titulo: str = Field(min_length=1, max_length=180)
+    evidencia_ids: list[str] = Field(default_factory=list, max_length=10)
+
+
+class PeticionSimulacionAutonomia(BaseModel):
+    proyecto: str = Field(min_length=2, max_length=100)
+    propuestas_simuladas: list[PropuestaSimulada] = Field(min_length=1, max_length=8)
+
+
+@app.post("/autonomia/simular_comparacion")
+def simular_comparacion_autonomia(peticion: PeticionSimulacionAutonomia,
+                                _auth=Depends(autorizar)):
+    """Compara propuestas hipoteticas con el historial real, sin persistir nada."""
+    proyecto = proyecto_validado(peticion.proyecto)
+    if not proyecto:
+        raise HTTPException(status_code=422, detail="Proyecto no reconocido")
+    anteriores = historial_autonomia(proyecto, 5)
+    propuestas = []
+    for item in peticion.propuestas_simuladas:
+        referencias = item.evidencia_ids
+        if any(not isinstance(ref, str) or not re.fullmatch(r"aura_task_[a-zA-Z0-9_]{1,80}", ref)
+               for ref in referencias):
+            raise HTTPException(status_code=422,
+                                detail="Las evidencias simuladas deben tener formato aura_task_...")
+        propuestas.append({"titulo": item.titulo,
+                           "evidencia_ids": sorted(set(referencias))})
+    comparacion = comparar_propuestas_estructuradas(propuestas, anteriores)
+    return {
+        "version": "3.17.1",
+        "modo": "simulacion_aislada_de_evidencias",
+        "proyecto": proyecto,
+        "solo_lectura": True,
+        "acciones_ejecutadas": 0,
+        "acciones_sobre_tareas": 0,
+        "historial_consultado": len(anteriores),
+        "propuestas_simuladas": propuestas,
+        "comparacion_programatica": comparacion,
+        "aviso": "Los identificadores simulados no se verifican contra tareas reales; "
+                 "no se ha guardado ningun analisis ni se ha modificado ninguna tarea. "
+                 "La comparacion no demuestra contradicciones semanticas.",
     }
 
 
