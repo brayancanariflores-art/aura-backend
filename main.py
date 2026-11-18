@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.14.9")
+app = FastAPI(title="Aura Cloud Brain", version="3.14.10")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -721,8 +721,32 @@ PATRON_CAMBIO_EXPLICITO = re.compile(
 )
 
 
+def es_solicitud_hipotetica_sin_escritura(mensaje):
+    """Evita interpretar simulaciones sin permiso como cambios de memoria.
+
+    Una orden afirmativa al inicio tiene prioridad para no ocultar solicitudes
+    reales de actualizacion acompañadas de explicaciones.
+    """
+    t = normalizar_recuerdo(mensaje)
+    t = re.sub(r"^aura\s+", "", t)
+    if re.match(r"^(?:actualiza|actualizar|cambia|cambiar|modifica|modificar|"
+                r"renombra|renombrar|reemplaza|reemplazar|sustituye)\b", t):
+        return False
+    contexto_hipotetico = bool(re.search(
+        r"\b(?:simulacion|simula|simular|hipotetico|hipotetica|imagina|"
+        r"solo de asesoramiento|unicamente como ejemplo|como ejemplo hipotetico)\b", t))
+    prohibicion = bool(re.search(
+        r"\b(?:no autorizo|sin autorizacion|no tienes autorizacion|"
+        r"no realices cambios|no hagas cambios|mant[eé]n todos los datos|"
+        r"mantener todos los datos|sin modificar|no modifiques|"
+        r"no actualices|no actualizar|no registres|no crees)\b", t))
+    return contexto_hipotetico and prohibicion
+
+
 def procesar_cambio_explicito(mensaje):
     """Una solicitud de cambio nunca crea otro recuerdo ni modifica SQLite sin confirmar."""
+    if es_solicitud_hipotetica_sin_escritura(mensaje):
+        return None
     if not PATRON_CAMBIO_EXPLICITO.search(mensaje):
         return None
     # Negaciones de escritura no son solicitudes de actualización.
@@ -774,6 +798,9 @@ def procesar_cambio_explicito(mensaje):
 
 
 def guardar_memorias_automaticas(mensaje):
+    # Una simulacion no es un hecho duradero que deba persistirse.
+    if es_solicitud_hipotetica_sin_escritura(mensaje):
+        return []
     # Nunca guardar un cambio como recuerdo nuevo si falla su clasificación.
     if PATRON_CAMBIO_EXPLICITO.search(mensaje) and not re.search(
             r"\b(?:sin|no)\s+(?:modificar|modifiques|cambiar|cambies|actualizar|actualices)\b",
