@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.14.11")
+app = FastAPI(title="Aura Cloud Brain", version="3.14.12")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -2067,11 +2067,74 @@ class PeticionChat(BaseModel):
     texto: str = Field(min_length=1, max_length=10000)
 
 
+
+def registrar_tarea_natural_verificada(pregunta):
+    """Autoriza una creación explícita con descripción citada y verifica SQLite.
+
+    Una mención hipotética o una consulta no es autorización.
+    """
+    texto = re.sub(r"^aura[, :]*\s*", "", pregunta.strip(), flags=re.I).strip()
+    normal = normalizar_recuerdo(texto)
+    prefijo = re.match(
+        r"^(?:autorizo(?:\s+expresamente)?(?:\s+(?:a|que))?|"
+        r"tienes\s+mi\s+permiso\s+para|"
+        r"te\s+doy\s+(?:mi\s+)?(?:permiso|autorizacion)\s+para|"
+        r"te\s+autorizo\s+a|"
+        r"apruebo(?:\s+que)?|"
+        r"puedes)\s+(.+)$", normal, re.S)
+    if not prefijo:
+        return None
+    resto = prefijo.group(1).strip()
+    if not re.search(r"\b(?:crear|crea|agregar|agrega|registrar|registra|guardar|guarda)\b", resto):
+        return None
+    # Negaciones o supuestos sobre la acción principal nunca autorizan escritura.
+    if re.search(r"\b(?:supongamos|supone|imagina|hipotetic|simulacion|"
+                 r"ejemplo|no registres|no registrar|no crees|no crear|"
+                 r"no agregues|sin registrar|sin crear|"
+                 r"todavia no autorizo|aun no autorizo)\b", normal):
+        return None
+    if re.search(r"^(?:puedes)\b", normal) and "?" in texto:
+        return None
+    proyecto = proyecto_explicito(texto)
+    if not proyecto:
+        return {"respuesta": "No registré ninguna tarea: necesito identificar un único proyecto conocido.",
+                "estado_tarea": "requiere_proyecto", "cambios": False}
+    # La descripción se exige entre comillas para evitar registrar instrucciones adicionales.
+    citas = re.findall(r'["“«]([^"”»]{5,350})["”»]', texto, re.S)
+    if len(citas) != 1:
+        return {"respuesta": "No registré ninguna tarea: indica una sola descripción entre comillas.",
+                "estado_tarea": "requiere_descripcion", "cambios": False}
+    descripcion = citas[0].strip().rstrip(".! ")
+    # La autorización debe referirse a la creación de una tarea.
+    if not re.search(r"\b(?:tarea|actividad)\b", normal):
+        return None
+    dato = guardar_tarea(proyecto, descripcion)
+    verificada = next((t for t in listar_tareas(proyecto, None)
+                       if t["id"] == dato["id"] and
+                       normalizar_recuerdo(t["descripcion"]) == normalizar_recuerdo(descripcion)), None)
+    if not verificada:
+        return {"respuesta": "No pude verificar la escritura en SQLite. No confirmo el registro.",
+                "estado_tarea": "no_verificada", "cambios": False}
+    if dato["duplicada"]:
+        respuesta = f"La tarea '{descripcion}' ya existía en {proyecto}; no creé un duplicado."
+    else:
+        respuesta = f"Registré y verifiqué en SQLite la tarea pendiente de {proyecto}: {descripcion}."
+    return {"respuesta": respuesta, "estado_tarea": verificada["estado"],
+            "tarea_id": verificada["id"], "duplicada": dato["duplicada"],
+            "cambios": not dato["duplicada"]}
+
+
 @app.post("/chat")
 def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
     pregunta = peticion.texto.strip()
     if not pregunta:
         raise HTTPException(status_code=422, detail="El campo texto no puede estar vacio")
+    # Las autorizaciones naturales pasan primero por SQLite, nunca por el LLM.
+    registro_natural = registrar_tarea_natural_verificada(pregunta)
+    if registro_natural is not None:
+        guardar_en_historial("user", pregunta)
+        guardar_en_historial("assistant", registro_natural["respuesta"])
+        return registro_natural
     # Las consultas con razonamiento adicional deben llegar al modelo con contexto SQLite.
     respuesta_tareas = (None if es_peticion_de_planificacion(pregunta)
                        else consultar_tarea_contextual(pregunta))
@@ -2092,6 +2155,20 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
         return {"respuesta": ("No registre ninguna tarea porque no pude interpretar la orden "
                 "con seguridad. Usa: 'Registra una tarea en Proyecto Centinela: descripcion'."),
                 "estado_tarea": "requiere_formato", "cambios": False}
+    # Nunca permitir que el LLM invente una confirmación de escritura.
+    texto_sin_aura = re.sub(r"^aura[, :]*\s*", "", pregunta.strip(), flags=re.I)
+    normal_escritura = normalizar_recuerdo(texto_sin_aura)
+    if (re.match(r"^(?:autorizo|apruebo|confirmo|te autorizo|"
+                 r"tienes mi permiso|te doy mi permiso|puedes|"
+                 r"registra|crea|agrega|guarda)\b", normal_escritura)
+            and re.search(r"\b(?:crear|registrar|agregar|guardar|"
+                          r"registra|crea|agrega|guarda)\b", normal_escritura)
+            and re.search(r"\b(?:tarea|actividad)\b", normal_escritura)
+            and not es_solicitud_hipotetica_sin_escritura(pregunta)):
+        return {"respuesta": ("No registré ninguna tarea: la autorización no se pudo "
+                "interpretar de forma verificable. Indica un proyecto conocido y "
+                "una única descripción entre comillas."),
+                "estado_tarea": "requiere_aclaracion", "cambios": False}
     temporal = responder_consulta_temporal(pregunta)
     if temporal is not None:
         return temporal
