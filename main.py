@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.14.10")
+app = FastAPI(title="Aura Cloud Brain", version="3.14.11")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -743,11 +743,35 @@ def es_solicitud_hipotetica_sin_escritura(mensaje):
     return contexto_hipotetico and prohibicion
 
 
+def es_peticion_de_planificacion(mensaje):
+    """Las aprobaciones para analizar o planificar no son permisos de escritura."""
+    t = normalizar_recuerdo(mensaje)
+    t = re.sub(r"^aura[, : ]*", "", t).strip()
+    plan = bool(re.search(
+        r"\b(?:plan|planificar|planificacion|preparar|prepares|elaborar|"
+        r"desarrollar|analizar|analiza|revisar|revisa|identifica|justifica|determina|priorizar|recomendar|"
+        r"propuesta|simulacion|hipotetico|asesoramiento)\b", t))
+    escritura_directa = bool(re.match(
+        r"^(?:autorizo|apruebo|confirmo)\s+(?:aura\s+)?(?:a\s+)?"
+        r"(?:registrar|crear|guardar|agregar|actualizar|modificar|"
+        r"completar|marcar)\b", t))
+    return plan and not escritura_directa
+
+
+def es_orden_directa_de_memoria(mensaje):
+    """No confundir menciones de 'modificar' con ordenes de editar recuerdos."""
+    t = normalizar_recuerdo(mensaje)
+    t = re.sub(r"^aura[, : ]*", "", t).strip()
+    return bool(re.match(
+        r"^(?:actualiza|actualizar|actualice|cambia|cambiar|renombra|"
+        r"renombrar|reemplaza|reemplazar|sustituye|modifica|modificar)\b", t))
+
+
 def procesar_cambio_explicito(mensaje):
     """Una solicitud de cambio nunca crea otro recuerdo ni modifica SQLite sin confirmar."""
-    if es_solicitud_hipotetica_sin_escritura(mensaje):
+    if es_solicitud_hipotetica_sin_escritura(mensaje) or es_peticion_de_planificacion(mensaje):
         return None
-    if not PATRON_CAMBIO_EXPLICITO.search(mensaje):
+    if not es_orden_directa_de_memoria(mensaje):
         return None
     # Negaciones de escritura no son solicitudes de actualización.
     if re.search(r"\b(?:sin|no)\s+(?:modificar|modifiques|cambiar|cambies|actualizar|actualices)\b",
@@ -799,10 +823,10 @@ def procesar_cambio_explicito(mensaje):
 
 def guardar_memorias_automaticas(mensaje):
     # Una simulacion no es un hecho duradero que deba persistirse.
-    if es_solicitud_hipotetica_sin_escritura(mensaje):
+    if es_solicitud_hipotetica_sin_escritura(mensaje) or es_peticion_de_planificacion(mensaje):
         return []
     # Nunca guardar un cambio como recuerdo nuevo si falla su clasificación.
-    if PATRON_CAMBIO_EXPLICITO.search(mensaje) and not re.search(
+    if es_orden_directa_de_memoria(mensaje) and not re.search(
             r"\b(?:sin|no)\s+(?:modificar|modifiques|cambiar|cambies|actualizar|actualices)\b",
             normalizar_recuerdo(mensaje)):
         return []
@@ -2048,10 +2072,12 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
     pregunta = peticion.texto.strip()
     if not pregunta:
         raise HTTPException(status_code=422, detail="El campo texto no puede estar vacio")
-    respuesta_tareas = consultar_tarea_contextual(pregunta)
-    if respuesta_tareas is None:
+    # Las consultas con razonamiento adicional deben llegar al modelo con contexto SQLite.
+    respuesta_tareas = (None if es_peticion_de_planificacion(pregunta)
+                       else consultar_tarea_contextual(pregunta))
+    if respuesta_tareas is None and not es_peticion_de_planificacion(pregunta):
         respuesta_tareas = comando_tarea_supervisada(pregunta)
-    if respuesta_tareas is None:
+    if respuesta_tareas is None and not es_peticion_de_planificacion(pregunta):
         respuesta_tareas = comando_tareas(pregunta)
     if respuesta_tareas is not None:
         guardar_en_historial("user", pregunta)
