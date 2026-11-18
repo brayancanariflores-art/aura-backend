@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.16.0")
+app = FastAPI(title="Aura Cloud Brain", version="3.17.0")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -2358,7 +2358,7 @@ def consultar_historial_autonomia(proyecto: str, limite: int = 5, _auth=Depends(
     if not validado:
         raise HTTPException(status_code=422, detail="Proyecto no reconocido")
     registros = historial_autonomia(validado, limite)
-    return {"version": "3.16.0", "proyecto": validado,
+    return {"version": "3.17.0", "proyecto": validado,
             "total_devuelto": len(registros), "historial": registros}
 
 
@@ -2450,7 +2450,7 @@ def analizar_autonomia(peticion: PeticionAutonomia, _auth=Depends(autorizar)):
                 "estado": "propuesta_no_ejecutada",
             })
         return {
-            "version": "3.16.0", "modo": "analisis_autonomo_supervisado",
+            "version": "3.17.0", "modo": "analisis_autonomo_supervisado",
             "solo_lectura": True, "acciones_ejecutadas": 0,
             "diagnostico": str(plan.get("diagnostico", ""))[:2000],
             "propuestas": propuestas,
@@ -2471,6 +2471,78 @@ def analizar_autonomia(peticion: PeticionAutonomia, _auth=Depends(autorizar)):
     except (ValueError, TypeError, KeyError, json.JSONDecodeError):
         logger.exception("Respuesta no valida en analisis autonomo")
         raise HTTPException(status_code=502, detail="El modelo devolvio un analisis no valido")
+
+
+# AURA 3.17.0: comparacion programatica de evidencia historica.
+# Solo lectura: no escribe en historial, tareas ni memorias.
+def comparar_propuestas_estructuradas(actuales, anteriores):
+    """Compara referencias de tareas, sin confundir similitud con verdad semantica."""
+    previas = []
+    for registro in anteriores:
+        for propuesta in registro.get("propuestas", []):
+            if isinstance(propuesta, dict):
+                previas.append({
+                    "analisis_id": registro.get("id"),
+                    "titulo": str(propuesta.get("titulo", ""))[:180],
+                    "evidencia_ids": sorted(set(
+                        x for x in propuesta.get("evidencia_ids", [])
+                        if isinstance(x, str)
+                    )),
+                })
+    resultado = []
+    for propuesta in actuales:
+        refs = set(propuesta.get("evidencia_ids", []))
+        comparables = []
+        for anterior in previas:
+            anteriores_ids = set(anterior["evidencia_ids"])
+            if refs and anteriores_ids and refs & anteriores_ids:
+                union = refs | anteriores_ids
+                comparables.append({
+                    "analisis_id": anterior["analisis_id"],
+                    "titulo_anterior": anterior["titulo"],
+                    "evidencia_ids_comunes": sorted(refs & anteriores_ids),
+                    "evidencia_ids_agregados": sorted(refs - anteriores_ids),
+                    "evidencia_ids_retirados": sorted(anteriores_ids - refs),
+                    "coincidencia_evidencia": round(len(refs & anteriores_ids) / len(union), 3),
+                })
+        comparables.sort(key=lambda x: (-x["coincidencia_evidencia"], str(x["analisis_id"])))
+        resultado.append({
+            "titulo_actual": propuesta.get("titulo", ""),
+            "evidencia_ids_actuales": sorted(refs),
+            "coincidencias_historicas": comparables[:5],
+            "estado_comparacion": "referencias_compartidas" if comparables else "sin_referencias_compartidas",
+            "contradiccion_semantica_verificada": False,
+        })
+    return {
+        "propuestas_historicas_examinadas": len(previas),
+        "propuestas_actuales_examinadas": len(actuales),
+        "comparaciones": resultado,
+        "limites": [
+            "Compartir identificadores de tareas no demuestra acuerdo entre recomendaciones.",
+            "La ausencia de identificadores compartidos no demuestra contradiccion.",
+            "No se verifican automaticamente afirmaciones semanticas, prioridades ni dependencias.",
+        ],
+    }
+
+
+@app.post("/autonomia/autoevaluar")
+def autoevaluar_autonomia(peticion: PeticionAutonomia, _auth=Depends(autorizar)):
+    """Genera un analisis no persistido y compara evidencia con el historial guardado."""
+    resultado = analizar_autonomia(peticion)
+    proyecto = resultado["evidencia"]["proyecto"]
+    anteriores = historial_autonomia(proyecto, 5)
+    comparacion = comparar_propuestas_estructuradas(resultado["propuestas"], anteriores)
+    return {
+        "version": "3.17.0",
+        "modo": "autoevaluacion_estructurada_supervisada",
+        "solo_lectura": True,
+        "acciones_ejecutadas": 0,
+        "acciones_sobre_tareas": 0,
+        "historial_consultado": len(anteriores),
+        "analisis_actual": resultado,
+        "comparacion_programatica": comparacion,
+        "aviso": "Comparacion estructural de evidencia, no prueba de contradicciones semanticas ni aprendizaje autonomo.",
+    }
 
 
 @app.post("/chat")
