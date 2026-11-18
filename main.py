@@ -3237,19 +3237,21 @@ class PeticionDecisionOperativa(BaseModel):
 
 
 def similitud_propuesta_aura(a, b):
-    """Comparacion conservadora: detecta coincidencias lexicales importantes."""
+    """Similitud conservadora; una coincidencia tematica no basta para bloquear."""
     palabras_vacias = {
         'de', 'la', 'el', 'las', 'los', 'del', 'para', 'por', 'con', 'en',
         'un', 'una', 'y', 'a', 'que', 'cada', 'sobre', 'se', 'su', 'al',
         'tareas', 'tarea', 'proyecto', 'sistema', 'establecer', 'realizar',
-        'crear', 'definir', 'desarrollar', 'implementar', 'mejorar'
+        'crear', 'definir', 'desarrollar', 'implementar', 'mejorar',
+        'revisar', 'actualizar', 'hacer', 'permitir', 'mediante'
     }
     def tokens(s):
         return set(normalizar_recuerdo(s).split()) - palabras_vacias
     ta, tb = tokens(a), tokens(b)
-    if not ta or not tb:
+    inter = len(ta & tb)
+    if inter < 4 or not ta or not tb:
         return 0.0
-    return len(ta & tb) / min(len(ta), len(tb))
+    return inter / len(ta | tb)
 
 
 @app.post('/evolucion/ciclo', tags=['AURA 5 - Evolucion supervisada'])
@@ -3288,6 +3290,7 @@ def ciclo_evolucion(peticion: PeticionCicloAutonomo, _auth=Depends(autorizar)):
                       for r in recuerdos[:12]],
          'analisis_previos': historicos[:5],
          'propuestas_anteriores': antecedentes,
+         'instruccion_evidencias': 'Para cada propuesta usa evidencia_ids del inventario real de tareas; si no hay IDs, explica la incertidumbre y no inventes referencias.',
          'max_propuestas': peticion.max_propuestas}
     )
     candidatas = plan.get('propuestas', [])
@@ -3295,7 +3298,8 @@ def ciclo_evolucion(peticion: PeticionCicloAutonomo, _auth=Depends(autorizar)):
         raise HTTPException(status_code=502, detail='Plan sin propuestas validas')
 
     existentes = [str(t['descripcion']) for t in tareas]
-    bloqueadas = existentes + [d for d, _ in anteriores]
+    bloqueadas = [(d, 'tarea_existente') for d in existentes] + [
+        (d, 'propuesta_' + e) for d, e in anteriores]
     seleccion, descartadas = [], []
     for propuesta in candidatas[:max(12, peticion.max_propuestas)]:
         if not isinstance(propuesta, dict):
@@ -3307,11 +3311,20 @@ def ciclo_evolucion(peticion: PeticionCicloAutonomo, _auth=Depends(autorizar)):
         if not descripcion or not es_informacion_segura(descripcion):
             descartadas.append({'motivo': 'descripcion_invalida'})
             continue
-        if any(normalizar_recuerdo(descripcion) == normalizar_recuerdo(d)
-               or similitud_propuesta_aura(descripcion, d) >= 0.78
-               for d in bloqueadas):
+        coincidencia = next((
+            (d, origen, similitud_propuesta_aura(descripcion, d))
+            for d, origen in bloqueadas
+            if normalizar_recuerdo(descripcion) == normalizar_recuerdo(d)
+            or (origen != 'tarea_existente' and
+                similitud_propuesta_aura(descripcion, d) >= 0.82)
+        ), None)
+        if coincidencia:
+            d, origen, puntuacion = coincidencia
             descartadas.append({'motivo': 'posible_duplicado',
-                                'descripcion': descripcion[:180]})
+                                'descripcion': descripcion[:180],
+                                'coincide_con': d[:180],
+                                'origen': origen,
+                                'similitud_lexica': round(puntuacion, 3)})
             continue
         referencias = propuesta.get('evidencia_ids', [])
         if not isinstance(referencias, list):
@@ -3339,7 +3352,7 @@ def ciclo_evolucion(peticion: PeticionCicloAutonomo, _auth=Depends(autorizar)):
             'tipo': 'crear_tarea', 'requiere_aprobacion': True
         }
         seleccion.append(item)
-        bloqueadas.append(descripcion)
+        bloqueadas.append((descripcion, 'propuesta_mismo_ciclo'))
         if len(seleccion) >= peticion.max_propuestas:
             break
 
@@ -3361,7 +3374,7 @@ def ciclo_evolucion(peticion: PeticionCicloAutonomo, _auth=Depends(autorizar)):
                     item['propuesta_id'] = pid
                     item['estado'] = 'pendiente'
     return {
-        'version': app.version, 'motor_evolucion': '5.1-integrado',
+        'version': app.version, 'motor_evolucion': '5.1.1-integrado',
         'proyecto': proyecto, 'ciclo_id': ciclo_id,
         'diagnostico_provisional': str(plan.get('diagnostico', ''))[:2000],
         'riesgos_provisionales': normalizar_lista_texto(plan.get('riesgos')),
