@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.14.5")
+app = FastAPI(title="Aura Cloud Brain", version="3.14.6")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -1657,12 +1657,42 @@ def comando_tarea_supervisada(pregunta):
             r"^(?:autorizo|apruebo|confirmo)\b", normal):
         return None  # Planificacion de solo lectura con contexto SQLite.
 
+    # Registro directo con descripcion citada y comprobacion de duplicados.
+    # Debe preceder al detector de existencia: "si ya existe" es una
+    # condicion de la orden de registro, NO una consulta independiente.
+    registro_citado = re.match(
+        r"^(?:registra|registrar|crea|crear|agrega|agregar|guarda|guardar)\s+"
+        r"(?:en\s+)?(.+?)\s+(?:la\s+)?(?:tarea|actividad)\s+"
+        r'["“«]([^"”»]+)["”»]', texto, re.I | re.S)
+    if registro_citado:
+        referencia, descripcion = registro_citado.groups()
+        proyecto = proyecto_explicito(referencia)
+        if not proyecto:
+            return {"respuesta": "Indica un unico proyecto conocido para registrar la tarea.",
+                    "estado_tarea": "requiere_proyecto", "cambios": False}
+        descripcion = descripcion.strip().rstrip('.! ')
+        dato = guardar_tarea(proyecto, descripcion)
+        verificada = next((t for t in listar_tareas(proyecto, None)
+                           if t['id'] == dato['id']), None)
+        if not verificada:
+            return {"respuesta": "No pude verificar la tarea en SQLite; no confirmo el registro.",
+                    "estado_tarea": "no_verificada", "cambios": False}
+        if dato['duplicada']:
+            respuesta = (f"La tarea '{verificada['descripcion']}' ya estaba registrada en "
+                         f"{proyecto} con estado {verificada['estado']}. No cree duplicados.")
+        else:
+            respuesta = (f"Registre y verifique en SQLite la tarea pendiente de "
+                         f"{proyecto}: {verificada['descripcion']}.")
+        return {"respuesta": respuesta, "estado_tarea": verificada['estado'],
+                "tarea_id": verificada['id'], "duplicada": dato['duplicada'],
+                "cambios": not dato['duplicada']}
+
     # Una pregunta de existencia siempre se responde desde SQLite.
     verifica = bool(re.search(r"\b(?:esta registrada|esta registrado|existe|figura|"
         r"se encuentra registrada|se encuentra registrado)\b", normal)) and bool(re.search(
         r"\b(?:consulta|consultar|verifica|verificar|comprueba|comprobar|"
         r"dime|confirma|confirmar|si|cual)\b", normal))
-    if verifica and not re.match(r"^(?:registra|crea|guarda|agrega)\b", normal):
+    if verifica and not re.match(r"^(?:registra|registrar|crea|crear|guarda|guardar|agrega|agregar)\b", normal):
         proyecto = proyecto_explicito(texto)
         if not proyecto:
             return {"respuesta": "Indica un unico proyecto conocido para verificar la tarea.",
@@ -1716,6 +1746,33 @@ def comando_tarea_supervisada(pregunta):
         return {"respuesta": ("No registre ninguna tarea: necesito el formato exacto "
                 "'Autorizo registrar una tarea en Proyecto Centinela: descripcion'."),
                 "estado_tarea": "requiere_formato", "cambios": False}
+
+    # Registro directo con dos puntos y condicion posterior de no duplicar.
+    registro_dos_puntos = re.match(
+        r"^(?:registra|registrar|crea|crear|agrega|agregar|guarda|guardar)\s+"
+        r"(?:en\s+)?(.+?)\s+(?:la\s+)?(?:tarea|actividad)\s+"
+        r"(?:pendiente\s*)?[:：]\s*(.+)$", texto, re.I | re.S)
+    if registro_dos_puntos:
+        referencia, descripcion = registro_dos_puntos.groups()
+        proyecto = proyecto_explicito(referencia)
+        if not proyecto:
+            return {"respuesta": "Indica un unico proyecto conocido para registrar la tarea.",
+                    "estado_tarea": "requiere_proyecto", "cambios": False}
+        descripcion = re.split(r"\.\s+(?:Si ya|No crees|No registres)\b",
+                               descripcion, maxsplit=1, flags=re.I)[0].strip().rstrip('.! ')
+        dato = guardar_tarea(proyecto, descripcion)
+        verificada = next((t for t in listar_tareas(proyecto, None)
+                           if t['id'] == dato['id']), None)
+        if not verificada:
+            return {"respuesta": "No pude verificar la tarea en SQLite; no confirmo el registro.",
+                    "estado_tarea": "no_verificada", "cambios": False}
+        respuesta = (f"La tarea '{verificada['descripcion']}' ya estaba registrada en {proyecto} "
+                     f"con estado {verificada['estado']}. No cree duplicados."
+                     if dato['duplicada'] else
+                     f"Registre y verifique en SQLite la tarea pendiente de {proyecto}: {verificada['descripcion']}.")
+        return {"respuesta": respuesta, "estado_tarea": verificada['estado'],
+                "tarea_id": verificada['id'], "duplicada": dato['duplicada'],
+                "cambios": not dato['duplicada']}
 
     # Consultas sobre si una tarea existe sin descripcion entre comillas.
     if verifica:
