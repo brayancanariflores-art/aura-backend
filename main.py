@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.14.1")
+app = FastAPI(title="Aura Cloud Brain", version="3.14.2")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -1667,6 +1667,27 @@ def comando_tareas(pregunta):
                               "Por ejemplo: 'Marca como completada la tarea de revisar la planificación "
                               "del proyecto en Proyecto Centinela'."),
                 "estado_tarea": "requiere_aclaracion", "cambios": False}
+
+    # Ordenes directas: "registra una tarea en Proyecto: descripcion".
+    # Se procesan antes de la respuesta generativa para que el chat
+    # confirme solo escrituras realmente efectuadas en SQLite.
+    orden_crear = re.match(
+        r"^(?:registra|registrar|crea|crear|agrega|agregar|anota|anotar|guarda|guardar)\s+"
+        r"(?:(?:una|la|nueva)\s+)?(?:tarea|actividad)\s+"
+        r"(?:pendiente\s+)?(?:en|para|del)\s+(.+?)\s*[:：]\s*(.+?)\s*[.!]?\s*$",
+        texto, re.I | re.S)
+    if orden_crear:
+        referencia, descripcion = orden_crear.groups()
+        proyecto = proyecto_explicito(referencia)
+        if not proyecto:
+            return {"respuesta": "Indica un único proyecto conocido para registrar la tarea.",
+                    "estado_tarea": "requiere_proyecto", "cambios": False}
+        descripcion = descripcion.strip().rstrip(".! ")
+        dato = guardar_tarea(proyecto, descripcion)
+        respuesta = (f"Esa tarea ya está registrada en {proyecto} con estado {dato['estado']}."
+                     if dato["duplicada"] else f"Guardé la tarea pendiente de {proyecto}: {descripcion}.")
+        return {"respuesta": respuesta, "estado_tarea": dato["estado"],
+                "tarea_id": dato["id"], "duplicada": dato["duplicada"]}
 
     patron = (r"^(?:(?:recuerda|anota|guarda|registra)\s+que\s+)?"
               r"(?:(?:nuestra|mi|la)\s+)?(?:pr[oó]xima\s+)?tarea\s+"
