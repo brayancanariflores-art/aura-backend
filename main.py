@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aura")
 
-app = FastAPI(title="Aura Cloud Brain", version="3.14.7")
+app = FastAPI(title="Aura Cloud Brain", version="3.14.8")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 DATA_DIR = os.getenv("AURA_DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -725,6 +725,10 @@ def procesar_cambio_explicito(mensaje):
     """Una solicitud de cambio nunca crea otro recuerdo ni modifica SQLite sin confirmar."""
     if not PATRON_CAMBIO_EXPLICITO.search(mensaje):
         return None
+    # Negaciones de escritura no son solicitudes de actualización.
+    if re.search(r"\b(?:sin|no)\s+(?:modificar|modifiques|cambiar|cambies|actualizar|actualices)\b",
+                 normalizar_recuerdo(mensaje)):
+        return None
     actuales = listar_recuerdos()
     if not actuales:
         return {"respuesta": "No hay recuerdos existentes que actualizar.",
@@ -771,7 +775,9 @@ def procesar_cambio_explicito(mensaje):
 
 def guardar_memorias_automaticas(mensaje):
     # Nunca guardar un cambio como recuerdo nuevo si falla su clasificación.
-    if PATRON_CAMBIO_EXPLICITO.search(mensaje):
+    if PATRON_CAMBIO_EXPLICITO.search(mensaje) and not re.search(
+            r"\b(?:sin|no)\s+(?:modificar|modifiques|cambiar|cambies|actualizar|actualices)\b",
+            normalizar_recuerdo(mensaje)):
         return []
     guardados = []
     for candidato in detectar_memorias_valiosas(mensaje):
@@ -1635,6 +1641,69 @@ def completar_tarea_por_chat(proyecto, descripcion):
             "estado_tarea": "completada", "tarea_id": tarea["id"], "cambios": True}
 
 
+def consultar_tarea_contextual(pregunta):
+    """Resuelve consultas de UNA tarea por referencias parciales, solo lectura.
+
+    No acepta instrucciones de escritura ni selecciona entre empates.
+    """
+    texto = re.sub(r"^aura[, :]*\s*", "", pregunta.strip(), flags=re.I).strip()
+    normal = normalizar_recuerdo(texto)
+    if not re.search(r"\b(?:tarea|actividad)\b", normal):
+        return None
+    if not re.search(r"\b(?:cual es el estado|que estado|estado actual|"
+                     r"esta registrada|esta registrado|existe|figura|"
+                     r"se encuentra registrada|se encuentra registrado|"
+                     r"consulta|consultar|verifica|verificar|dime si)\b", normal):
+        return None
+    # No interceptar peticiones mixtas que puedan contener una accion real.
+    if re.match(r"^(?:registra|registrar|crea|crear|agrega|agregar|guarda|"
+                r"guardar|marca|marcar|completa|completar|autoriza|autorizo|"
+                r"apruebo|confirmo|elimina|eliminar|borra|borrar)\b", normal):
+        return None
+    proyecto = proyecto_explicito(texto)
+    if not proyecto:
+        return {"respuesta": "Indica un único proyecto conocido para consultar la tarea.",
+                "estado_tarea": "requiere_proyecto", "cambios": False}
+    tareas = listar_tareas(proyecto, None)
+    citado = re.search(r'["“«](.+?)["”»]', texto, re.S)
+    if citado:
+        referencia = normalizar_recuerdo(citado.group(1))
+        exactas = [t for t in tareas if normalizar_recuerdo(t["descripcion"]) == referencia]
+        if len(exactas) == 1:
+            t = exactas[0]
+            return {"respuesta": f"La tarea '{t['descripcion']}' de {proyecto} está {t['estado']}.",
+                    "estado_tarea": "verificada", "tarea_id": t["id"], "cambios": False}
+    # Las palabras comunes no deben provocar coincidencias falsas.
+    stop = {"tarea", "tareas", "actividad", "actividades", "proyecto", "centinela",
+            "estado", "actual", "cual", "que", "esta", "registrada", "registrado",
+            "relacionada", "relacionado", "equipo", "consulta", "consultar", "dime",
+            "si", "existe", "verifica", "verificar", "continua", "continuo",
+            "pendiente", "pendientes", "completada", "completadas", "del", "para",
+            "con", "las", "los", "una", "por", "sin", "modificar", "nada",
+            "identifica", "identificar", "registradas", "registrados"}
+    palabras = {w for w in normal.split() if len(w) >= 4 and w not in stop}
+    # Se exige una referencia suficientemente informativa.
+    if not palabras:
+        return None
+    candidatas = []
+    for t in tareas:
+        tokens = set(normalizar_recuerdo(t["descripcion"]).split())
+        relevantes = {w for w in palabras if w in tokens}
+        if len(relevantes) >= 1 and len(relevantes) == len(palabras):
+            candidatas.append(t)
+    if len(candidatas) == 1:
+        t = candidatas[0]
+        return {"respuesta": f"La tarea '{t['descripcion']}' de {proyecto} está {t['estado']}.",
+                "estado_tarea": "verificada", "tarea_id": t["id"], "cambios": False}
+    if len(candidatas) > 1:
+        return {"respuesta": "Encontré varias tareas compatibles. Especifica cuál deseas consultar: " +
+                "; ".join(t["descripcion"] for t in candidatas[:5]),
+                "estado_tarea": "ambigua", "cambios": False}
+    return {"respuesta": "No pude identificar una tarea de forma inequívoca. "
+            "Indica más palabras de su descripción o escríbela entre comillas.",
+            "estado_tarea": "requiere_descripcion", "cambios": False}
+
+
 def comando_tarea_supervisada(pregunta):
     """Interpreta autorizaciones y verificaciones sin delegar hechos al LLM.
 
@@ -1944,7 +2013,9 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
     pregunta = peticion.texto.strip()
     if not pregunta:
         raise HTTPException(status_code=422, detail="El campo texto no puede estar vacio")
-    respuesta_tareas = comando_tarea_supervisada(pregunta)
+    respuesta_tareas = consultar_tarea_contextual(pregunta)
+    if respuesta_tareas is None:
+        respuesta_tareas = comando_tarea_supervisada(pregunta)
     if respuesta_tareas is None:
         respuesta_tareas = comando_tareas(pregunta)
     if respuesta_tareas is not None:
