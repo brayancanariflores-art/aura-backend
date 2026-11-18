@@ -3252,7 +3252,10 @@ def ciclo_evolucion(peticion: PeticionCicloAutonomo, _auth=Depends(autorizar)):
         'Responde JSON con diagnostico (texto), riesgos (lista), '
         'propuestas (lista de objetos con descripcion y justificacion).',
         {'objetivo': peticion.objetivo, 'proyecto': proyecto,
-         'tareas_sqlite': evidencia[:80],
+        'tareas_sqlite': {
+            **evidencia,
+                    'inventario': evidencia.get('inventario', [])[:80]
+        },
          'memorias': [{'id': r['id'], 'contenido': r['contenido']} for r in recuerdos[:12]],
          'analisis_previos': historicos[:5], 'max_propuestas': peticion.max_propuestas})
     candidatas = plan.get('propuestas', [])
