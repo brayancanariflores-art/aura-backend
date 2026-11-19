@@ -4327,6 +4327,85 @@ def autonomia_diagnostico(_auth=Depends(autorizar)):
         'advertencia': 'Diagnostico basico; no certifica seguridad ni disponibilidad en produccion.'
     }
 
+
+
+# =============================================================
+# AURA - HERRAMIENTA REAL DE INVESTIGACION BAJO DEMANDA
+# Solo lectura: la invocacion manual permite investigar y auditar.
+# No confundir con permiso para ejecutar modificaciones externas.
+# =============================================================
+class PeticionInvestigacionManual(BaseModel):
+    objetivo_id: str = Field(min_length=1, max_length=100)
+    consulta: str = Field(min_length=8, max_length=500)
+    confirmar: bool = False
+
+
+def inicializar_investigaciones_manuales():
+    with agente_db() as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS investigaciones_manuales (
+            id TEXT PRIMARY KEY,
+            objetivo_id TEXT NOT NULL,
+            consulta TEXT NOT NULL,
+            resultado TEXT NOT NULL,
+            estado TEXT NOT NULL,
+            creado TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
+
+
+inicializar_investigaciones_manuales()
+
+
+@app.post('/autonomia/investigar', tags=['AURA - Autonomia supervisada'])
+def autonomia_investigar(p: PeticionInvestigacionManual, _auth=Depends(autorizar)):
+    """Ejecuta una busqueda web real SOLO tras confirmacion explicita.
+
+    La investigacion no modifica tareas, archivos, memoria ni sistemas externos.
+    """
+    objetivo = autonomia_objetivo(p.objetivo_id)
+    if not objetivo['activo']:
+        raise HTTPException(status_code=409, detail='Objetivo desactivado')
+    consulta = p.consulta.strip()
+    if not p.confirmar:
+        return {
+            'estado': 'vista_previa', 'consulta': consulta,
+            'proyecto': objetivo['proyecto'],
+            'herramienta': 'busqueda_web_solo_lectura',
+            'ejecutado': False, 'cambios': False
+        }
+    if ai_client is None:
+        raise HTTPException(status_code=503, detail='Modelo de busqueda no configurado')
+    # La consulta no se interpreta como instrucciones para escribir datos.
+    resultado = web_search(consulta)
+    fallida = resultado.startswith((
+        'No pude', 'La búsqueda web no está disponible',
+        'No se proporcionó', 'Encontré fuentes, pero'
+    ))
+    iid = 'aura_investigacion_' + uuid.uuid4().hex
+    estado = 'sin_evidencia_verificable' if fallida else 'investigacion_registrada'
+    with AUTONOMY_LOCK, agente_db() as conn:
+        conn.execute("""INSERT INTO investigaciones_manuales
+            (id,objetivo_id,consulta,resultado,estado)
+            VALUES (?,?,?,?,?)""",
+            (iid, p.objetivo_id, consulta, resultado, estado))
+    return {
+        'estado': estado, 'investigacion_id': iid,
+        'objetivo_id': p.objetivo_id, 'resultado': resultado,
+        'modificaciones_externas': False,
+        'nota': 'Las fuentes y conclusiones requieren revision humana.'
+    }
+
+
+@app.get('/autonomia/investigaciones', tags=['AURA - Autonomia supervisada'])
+def autonomia_investigaciones(limite: int = 20, _auth=Depends(autorizar)):
+    if not 1 <= limite <= 100:
+        raise HTTPException(status_code=422, detail='Limite entre 1 y 100')
+    with agente_db() as conn:
+        conn.row_factory = sqlite3.Row
+        filas = conn.execute("""SELECT id, objetivo_id, consulta, estado, creado
+            FROM investigaciones_manuales ORDER BY creado DESC LIMIT ?""",
+            (limite,)).fetchall()
+    return {'investigaciones': [dict(f) for f in filas]}
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
