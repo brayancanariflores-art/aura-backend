@@ -1568,12 +1568,24 @@ def proyectos_conocidos():
     return nombres
 
 
+def pide_mencionar_proyectos_una_vez(texto):
+    return bool(re.search(
+        r"\b(?:cada (?:uno de (?:mis |nuestros |los )?)?proyectos?|"
+        r"(?:mis|nuestros|los) proyectos)\b.{0,80}\b(?:una (?:sola )?vez|sin repetir)\b",
+        texto,
+    ))
+
+
 def respuesta_inventario(pregunta):
     texto = normalizar_recuerdo(pregunta)
     inventario = re.search(r"\b(?:cuantos proyectos (?:(?:mios|nuestros) )?(?:tenemos|tengo|hay registrados|recuerdas|conoces)|"
                      r"total de (?:mis |nuestros )?proyectos|(?:mis|nuestros) proyectos\b.*\b(?:pendientes|terminados)|"
                      r"(?:lista|enumera|menciona) (?:todos )?(?:mis|nuestros|los) proyectos)\b", texto)
-    if not inventario:
+    lista_sin_repeticiones = (
+        pide_mencionar_proyectos_una_vez(texto)
+        and not re.search(r"\b(?:tareas?|actividades?)\b", texto)
+    )
+    if not inventario and not lista_sin_repeticiones:
         sobre_estados = re.search(r"\b(?:estados?|pendientes|terminados|completados)\b", texto)
         if not sobre_estados or re.search(r"\b(?:tareas?|actividades?)\b", texto):
             return None
@@ -2324,13 +2336,14 @@ def contexto_analitico_verificado(proyecto, tareas):
     )
 
 
-def anexo_cobertura_tareas(proyecto, tareas):
+def anexo_cobertura_tareas(proyecto, tareas, incluir_proyecto=True):
     """Garantiza una lista exhaustiva de pendientes aunque el LLM omita alguna."""
     pendientes = [t for t in tareas if t["estado"] == "pendiente"]
+    etiqueta = f" — {proyecto}" if incluir_proyecto else ""
     if not pendientes:
-        return f"\n\n**Cobertura SQLite — {proyecto}:** no hay tareas pendientes."
+        return f"\n\n**Cobertura SQLite{etiqueta}:** no hay tareas pendientes."
     lista = "\n".join(f"- {t['descripcion']} (pendiente)" for t in pendientes)
-    return (f"\n\n**Inventario completo de pendientes en SQLite — {proyecto} "
+    return (f"\n\n**Inventario completo de pendientes en SQLite{etiqueta} "
             f"({len(pendientes)}):**\n{lista}\n"
             "*Este inventario es factual; las prioridades y dependencias del "
             "analisis anterior son propuestas salvo respaldo documental explicito.*")
@@ -3773,6 +3786,10 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
                     "ni asumas que uno es el nombre oficial de AURA. "
                     "Si no hay evidencia suficiente para identificar un proyecto, pide aclaracion. "
                     "Distingue recuerdos comprobados de inferencias. "
+                    "Un estado de tarea no establece el estado general del proyecto. "
+                    "Afirma el estado general solo si un recuerdo vigente lo confirma explícitamente. "
+                    "Cuando el usuario pida mencionar cada proyecto una sola vez, evita repetir "
+                    "sus nombres, incluso en el resumen final. "
                     "No atribuyas origen, fecha o conversacion a un recuerdo sin evidencia. "
                     "Eres Aura, una asistente personal calida, empatica y amigable. "
                     "Hablas exclusivamente en espanol latino neutro y natural. "
@@ -3861,7 +3878,10 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
             raise ValueError("OpenAI devolvio una respuesta vacia")
         # Anexo determinista: no depender del modelo para enumerar todos los pendientes.
         if analisis_proyecto:
-            assistant_reply += anexo_cobertura_tareas(proyecto_tareas, tareas_contexto)
+            assistant_reply += anexo_cobertura_tareas(
+                proyecto_tareas, tareas_contexto,
+                incluir_proyecto=not pide_mencionar_proyectos_una_vez(normal_pregunta),
+            )
         # El guardado automatico no debe impedir responder si falla.
         guardados = guardar_memorias_automaticas(pregunta)
         if guardados:
