@@ -1569,7 +1569,7 @@ def proyectos_conocidos():
 
 def respuesta_inventario(pregunta):
     texto = normalizar_recuerdo(pregunta)
-    if not re.search(r"\b(?:cuantos proyectos (?:tenemos|tengo|hay registrados)|"
+    if not re.search(r"\b(?:cuantos proyectos (?:(?:mios|nuestros) )?(?:tenemos|tengo|hay registrados|recuerdas|conoces)|"
                      r"total de (?:mis |nuestros )?proyectos|(?:mis|nuestros) proyectos\b.*\b(?:pendientes|terminados)|"
                      r"(?:lista|enumera|menciona) (?:todos )?(?:mis|nuestros|los) proyectos)\b", texto):
         return None
