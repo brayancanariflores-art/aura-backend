@@ -1610,6 +1610,15 @@ def respuesta_inventario(pregunta):
             if coincidencia:
                 grupo = "Pendientes" if coincidencia[1] == "pendiente" else "Terminados"
                 break
+        nombre_exacto = re.escape(clave)
+        tipo_temporal = r"proyecto (?:temporal de pruebas?|de pruebas? temporal)"
+        recuerdo_temporal = re.compile(
+            rf"(?:el |mi )?{nombre_exacto} es (?:un |el |mi )?{tipo_temporal}"
+            rf"|(?:el nombre (?:oficial )?de (?:mi |tu |el )?{tipo_temporal} es |"
+            rf"(?:mi |tu |el )?{tipo_temporal} se llama ){nombre_exacto}"
+        )
+        if any(recuerdo_temporal.fullmatch(recuerdo) for recuerdo in recuerdos):
+            nombre += " (proyecto temporal de prueba)"
         grupos[grupo].append(nombre)
     lineas = [f"Conozco {len(nombres)} proyectos."]
     for estado, proyectos in grupos.items():
