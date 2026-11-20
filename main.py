@@ -1578,6 +1578,11 @@ def pide_mencionar_proyectos_una_vez(texto):
 
 def respuesta_inventario(pregunta):
     texto = normalizar_recuerdo(pregunta)
+    incluir_recuerdos = bool(re.search(r"\b(?:que recuerdas|que sabes|recuerdos de|detalles de)\b", texto))
+    detalles_generales = incluir_recuerdos and re.search(
+        r"\b(?:de|sobre) (?:cada proyecto|cada uno de (?:mis|nuestros|los) proyectos|"
+        r"(?:mis|nuestros|los) proyectos)\b", texto
+    ) and not re.search(r"\b(?:tareas?|actividades?|documentos?|archivos?)\b", texto)
     inventario = re.search(r"\b(?:cuantos proyectos (?:(?:mios|nuestros) )?(?:tenemos|tengo|hay registrados|recuerdas|conoces)|"
                      r"total de (?:mis |nuestros )?proyectos|(?:mis|nuestros) proyectos\b.*\b(?:pendientes|terminados)|"
                      r"(?:lista|enumera|menciona) (?:todos )?(?:mis|nuestros|los) proyectos)\b", texto)
@@ -1585,7 +1590,7 @@ def respuesta_inventario(pregunta):
         pide_mencionar_proyectos_una_vez(texto)
         and not re.search(r"\b(?:tareas?|actividades?)\b", texto)
     )
-    if not inventario and not lista_sin_repeticiones:
+    if not (inventario or lista_sin_repeticiones or detalles_generales):
         sobre_estados = re.search(r"\b(?:estados?|pendientes|terminados|completados)\b", texto)
         if not sobre_estados or re.search(r"\b(?:tareas?|actividades?)\b", texto):
             return None
@@ -1599,29 +1604,79 @@ def respuesta_inventario(pregunta):
                     r"^Conozco \d+ proyectos\.", reciente[0]["content"]):
                 return None
     nombres = {normalizar_recuerdo(n): n for n in proyectos_conocidos()}
-    recuerdos = [normalizar_recuerdo(contenido) for _, contenido in listar_recuerdos()]
-    grupos = {"Terminados": [], "Pendientes": [], "Sin estado confirmado": []}
+    recuerdos = [(contenido, normalizar_recuerdo(contenido))
+                 for _, contenido in listar_recuerdos()]
+    tareas_por_proyecto = {}
+    if incluir_recuerdos:
+        for tarea in listar_tareas(estado=None):
+            tareas_por_proyecto.setdefault(normalizar_recuerdo(tarea["proyecto"]), []).append(tarea)
+    grupos = {"Terminados": [], "Pendientes": [], "Estados contradictorios": [],
+              "Sin estado confirmado": []}
+    lineas_proyecto = []
     for clave, nombre in nombres.items():
-        patron = re.compile(r"(?:el proyecto |mi proyecto |proyecto )?" + re.escape(clave)
-                            + r" (?:esta |ha sido |fue )(terminado|completado|finalizado|pendiente)")
-        grupo = "Sin estado confirmado"
-        for recuerdo in recuerdos:
-            coincidencia = patron.fullmatch(recuerdo)
-            if coincidencia:
-                grupo = "Pendientes" if coincidencia[1] == "pendiente" else "Terminados"
-                break
         nombre_exacto = re.escape(clave)
+        prefijo = rf"(?:el proyecto |mi proyecto |proyecto )?{nombre_exacto}"
+        patron = re.compile(
+            rf"(?:{prefijo} (?:esta |ha sido |fue )|"
+            rf"(?:el )?estado (?:del proyecto |de mi proyecto |de |del ){nombre_exacto} (?:es )?)"
+            r"(terminado|completado|finalizado|pendiente)"
+        )
+        estados = {
+            "pendiente" if coincidencia[1] == "pendiente" else "terminado"
+            for _, normal in recuerdos if (coincidencia := patron.fullmatch(normal))
+        }
+        if len(estados) > 1:
+            grupo, estado = "Estados contradictorios", "Estados contradictorios: pendiente y terminado"
+        elif estados == {"pendiente"}:
+            grupo, estado = "Pendientes", "Estado: pendiente"
+        elif estados == {"terminado"}:
+            grupo, estado = "Terminados", "Estado: terminado"
+        else:
+            grupo = estado = "Sin estado confirmado"
+
         tipo_temporal = r"proyecto (?:temporal de pruebas?|de pruebas? temporal)"
         recuerdo_temporal = re.compile(
             rf"(?:el |mi )?{nombre_exacto} es (?:un |el |mi )?{tipo_temporal}"
             rf"|(?:el nombre (?:oficial )?de (?:mi |tu |el )?{tipo_temporal} es |"
             rf"(?:mi |tu |el )?{tipo_temporal} se llama ){nombre_exacto}"
         )
-        if any(recuerdo_temporal.fullmatch(recuerdo) for recuerdo in recuerdos):
-            nombre += " (proyecto temporal de prueba)"
-        grupos[grupo].append(nombre)
+        temporal = any(recuerdo_temporal.fullmatch(normal) for _, normal in recuerdos)
+        if not incluir_recuerdos:
+            grupos[grupo].append(nombre + (" (proyecto temporal de prueba)" if temporal else ""))
+            continue
+
+        detalles = ["Proyecto temporal de prueba"] if temporal else []
+        referencia = r"[^\w]+".join(re.escape(palabra) for palabra in nombre.split())
+        patron_nombre = re.compile(rf"(?<!\w){referencia}(?!\w)", re.I)
+        vistos = set()
+        for contenido, normal in recuerdos:
+            if normal in vistos or patron.fullmatch(normal) or recuerdo_temporal.fullmatch(normal):
+                continue
+            referencias = [otro for otro in nombres if re.search(rf"\b{re.escape(otro)}\b", normal)]
+            if referencias != [clave]:
+                continue
+            detalle = patron_nombre.sub("este proyecto", contenido.strip().rstrip("."))
+            if re.search(rf"\b{nombre_exacto}\b", normalizar_recuerdo(detalle)):
+                continue
+            vistos.add(normal)
+            detalles.append(detalle)
+            if len(vistos) >= 3:
+                break
+        for tarea in tareas_por_proyecto.get(clave, [])[:3]:
+            descripcion = patron_nombre.sub("este proyecto", tarea["descripcion"].strip().rstrip("."))
+            normal = normalizar_recuerdo(descripcion)
+            if any(re.search(rf"\b{re.escape(otro)}\b", normal) for otro in nombres):
+                detalles.append(f"Tarea {tarea['estado']}")
+            else:
+                detalles.append(f"Tarea {tarea['estado']}: {descripcion}")
+        resumen = " · ".join(detalles) or "Sin detalles guardados"
+        lineas_proyecto.append(f"- **{nombre}** — {resumen}. {estado}.")
+    if incluir_recuerdos:
+        return "\n".join([f"Conozco {len(nombres)} proyectos.", *lineas_proyecto])
     lineas = [f"Conozco {len(nombres)} proyectos."]
     for estado, proyectos in grupos.items():
+        if estado == "Estados contradictorios" and not proyectos:
+            continue
         detalle = ", ".join(proyectos)
         lineas.append(f"{estado} ({len(proyectos)})" + (f": {detalle}." if detalle else "."))
     return " ".join(lineas)
