@@ -489,19 +489,19 @@ def guardar_recuerdo(contenido):
 
 
 def eliminar_recuerdos():
-    recuerdos = listar_recuerdos()
-    if recuerdos:
-        respaldo_memoria()
     with MEMORY_LOCK:
+        recuerdos = listar_recuerdos()
+        if not recuerdos:
+            return
+        respaldo_memoria()
         with conectar_memoria() as conn:
             for rid, anterior in recuerdos:
                 registrar_evento(conn, "eliminacion", rid, anterior, None)
             conn.execute("DELETE FROM recuerdos")
-    try:
-        if recuerdos:
+        try:
             collection.delete(ids=[fila[0] for fila in recuerdos])
-    except Exception:
-        logger.warning("No se pudo limpiar el indice vectorial")
+        except Exception:
+            logger.warning("No se pudo limpiar el indice vectorial")
 
 
 # AURA 3.9: recuperacion contextual sin modificar recuerdos.
@@ -702,11 +702,11 @@ def actualizar_recuerdo(identificador, contenido):
                 respaldo_memoria()
                 registrar_evento(conn, "actualizacion", identificador, existe[0], contenido)
                 conn.execute("UPDATE recuerdos SET contenido=? WHERE id=?", (contenido, identificador))
-        try:
-            collection.upsert(ids=[identificador], documents=[contenido],
-                              metadatas=[{"tipo": "recuerdo_aprobado"}])
-        except Exception:
-            logger.warning("Actualizacion SQLite realizada; indice Chroma pendiente")
+            try:
+                collection.upsert(ids=[identificador], documents=[contenido],
+                                  metadatas=[{"tipo": "recuerdo_aprobado"}])
+            except Exception:
+                logger.warning("Actualizacion SQLite realizada; indice Chroma pendiente")
         return True
     except sqlite3.Error:
         logger.exception("No se pudo actualizar recuerdo")
@@ -1091,7 +1091,8 @@ def descargar_respaldo_memoria(_auth=Depends(autorizar)):
             ruta_temporal = archivo.name
 
         # SQLite backup API crea una copia consistente incluso con la BD en uso.
-        with sqlite3.connect(MEMORY_DB, timeout=30) as origen:
+        origen_uri = Path(MEMORY_DB).resolve().as_uri() + "?mode=ro"
+        with sqlite3.connect(origen_uri, uri=True, timeout=30) as origen:
             with sqlite3.connect(ruta_temporal, timeout=30) as destino:
                 origen.backup(destino)
                 integridad = destino.execute("PRAGMA integrity_check").fetchone()[0]
@@ -3223,7 +3224,7 @@ def inicializar_operaciones():
 inicializar_operaciones()
 
 
-class PeticionCicloAutonomo(BaseModel):
+class PeticionCicloEvolucion(BaseModel):
     proyecto: str = Field(min_length=2, max_length=100)
     objetivo: str = Field(min_length=12, max_length=500)
     max_propuestas: int = Field(default=5, ge=1, le=8)
@@ -3255,7 +3256,7 @@ def similitud_propuesta_aura(a, b):
 
 
 @app.post('/evolucion/ciclo', tags=['AURA 5 - Evolucion supervisada'])
-def ciclo_evolucion(peticion: PeticionCicloAutonomo, _auth=Depends(autorizar)):
+def ciclo_evolucion(peticion: PeticionCicloEvolucion, _auth=Depends(autorizar)):
     """Planifica con evidencia y revision critica; no ejecuta tareas."""
     proyecto = proyecto_validado(peticion.proyecto)
     if not proyecto:
