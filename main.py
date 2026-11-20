@@ -1576,6 +1576,13 @@ def pide_mencionar_proyectos_una_vez(texto):
     ))
 
 
+def referencia_breve_al_proyecto(coincidencia):
+    determinante = coincidencia.group("determinante")
+    if determinante:
+        return f"{determinante} proyecto"
+    return "Este proyecto" if coincidencia.start() == 0 else "este proyecto"
+
+
 def respuesta_inventario(pregunta):
     texto = normalizar_recuerdo(pregunta)
     incluir_recuerdos = bool(re.search(r"\b(?:que recuerdas|que sabes|recuerdos de|detalles de)\b", texto))
@@ -1647,7 +1654,9 @@ def respuesta_inventario(pregunta):
 
         detalles = ["Proyecto temporal de prueba"] if temporal else []
         referencia = r"[^\w]+".join(re.escape(palabra) for palabra in nombre.split())
-        patron_nombre = re.compile(rf"(?<!\w){referencia}(?!\w)", re.I)
+        patron_nombre = re.compile(
+            rf"(?<!\w)(?:(?P<determinante>del|al|el|este|mi|tu)\s+)?{referencia}(?!\w)", re.I
+        )
         vistos = set()
         for contenido, normal in recuerdos:
             if normal in vistos or patron.fullmatch(normal) or recuerdo_temporal.fullmatch(normal):
@@ -1655,7 +1664,7 @@ def respuesta_inventario(pregunta):
             referencias = [otro for otro in nombres if re.search(rf"\b{re.escape(otro)}\b", normal)]
             if referencias != [clave]:
                 continue
-            detalle = patron_nombre.sub("este proyecto", contenido.strip().rstrip("."))
+            detalle = patron_nombre.sub(referencia_breve_al_proyecto, contenido.strip().rstrip("."))
             if re.search(rf"\b{nombre_exacto}\b", normalizar_recuerdo(detalle)):
                 continue
             vistos.add(normal)
@@ -1663,7 +1672,7 @@ def respuesta_inventario(pregunta):
             if len(vistos) >= 3:
                 break
         for tarea in tareas_por_proyecto.get(clave, [])[:3]:
-            descripcion = patron_nombre.sub("este proyecto", tarea["descripcion"].strip().rstrip("."))
+            descripcion = patron_nombre.sub(referencia_breve_al_proyecto, tarea["descripcion"].strip().rstrip("."))
             normal = normalizar_recuerdo(descripcion)
             if any(re.search(rf"\b{re.escape(otro)}\b", normal) for otro in nombres):
                 detalles.append(f"Tarea {tarea['estado']}")
