@@ -4007,16 +4007,24 @@ def _generar_mision_agente(peticion, *, experiencias=None):
               'acciones_externas_ejecutadas': 0, 'requiere_aprobacion': True,
               'persistido': False}
     if peticion.guardar:
-        mid = 'aura_mision_' + uuid.uuid4().hex
         with AGENT_LOCK, agente_db() as conn:
-            conn.execute('INSERT INTO misiones_agente (id,proyecto,objetivo,estado,plan_json,auditoria_json) VALUES (?,?,?,?,?,?)',
-                         (mid, ciclo['proyecto'], peticion.objetivo, 'pendiente',
-                          json.dumps(ciclo['plan_revisado'], ensure_ascii=False),
-                          json.dumps(auditoria, ensure_ascii=False)))
-            conn.execute('INSERT INTO eventos_agente (mision_id,tipo,detalle) VALUES (?,?,?)',
-                         (mid, 'plan_generado', 'Plan almacenado para revision humana; ninguna tarea ejecutada'))
+            mid = _guardar_mision_agente(conn, peticion.objetivo, salida)
         salida.update({'mision_id': mid, 'persistido': True})
     return salida
+
+
+def _guardar_mision_agente(conn, objetivo, salida):
+    mid = 'aura_mision_' + uuid.uuid4().hex
+    conn.execute(
+        'INSERT INTO misiones_agente (id,proyecto,objetivo,estado,plan_json,auditoria_json) VALUES (?,?,?,?,?,?)',
+        (mid, salida['proyecto'], objetivo, 'pendiente',
+         json.dumps(salida['plan'], ensure_ascii=False),
+         json.dumps(salida['auditoria'], ensure_ascii=False)))
+    conn.execute(
+        'INSERT INTO eventos_agente (mision_id,tipo,detalle) VALUES (?,?,?)',
+        (mid, 'plan_generado', 'Plan almacenado para revision humana; ninguna tarea ejecutada'))
+    return mid
+
 
 @app.get('/agente/misiones', tags=['AURA 7 - Agente supervisado'])
 def agente_listar_misiones(limite: int = 30, _auth=Depends(autorizar)):
@@ -4246,14 +4254,14 @@ def autonomia_ejecutar_ciclo(oid, max_pasos=5, forzar=False):
         contexto = json.dumps(lecciones, ensure_ascii=False)[:2800]
         solicitud = SolicitudMisionAgente(proyecto=objetivo['proyecto'],
                                          objetivo=objetivo['objetivo'],
-                                         max_pasos=max_pasos, iteraciones=1, guardar=True)
+                                         max_pasos=max_pasos, iteraciones=1)
         salida = _generar_mision_agente(solicitud, experiencias=contexto)
-        mid = salida['mision_id']
         cid = 'aura_ciclo_' + uuid.uuid4().hex
         detalle = {'lecciones_consultadas': len(lecciones['resultados_previos']),
                    'evaluaciones_humanas_consultadas': len(lecciones['evaluaciones_humanas']),
                    'plan_auditoria': salida['auditoria'], 'ejecucion_externa': False}
-        with agente_db() as conn:
+        with AGENT_LOCK, agente_db() as conn:
+            mid = _guardar_mision_agente(conn, objetivo['objetivo'], salida)
             conn.execute('''INSERT INTO ciclos_autonomos
                 (id,objetivo_id,mision_id,estado,detalle_json) VALUES (?,?,?,?,?)''',
                 (cid, oid, mid, 'pendiente_revision_humana',
