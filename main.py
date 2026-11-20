@@ -1561,7 +1561,8 @@ def proyectos_conocidos():
             r"(?:estoy desarrollando|presupuesto (?:de prueba )?de)\s+([^.,;\n]+?)(?:\s+es\s+de|,|\.|$)",
         ):
             for coincidencia in re.finditer(patron, contenido, re.I):
-                nombre = coincidencia.group(1).strip()
+                nombre = re.split(r"\s+y\s+(?:tiene|tendrá|cuenta con|está|incluye)\b",
+                                  coincidencia.group(1), maxsplit=1, flags=re.I)[0].strip()
                 if 3 <= len(nombre) <= 70 and normalizar_recuerdo(nombre) not in [normalizar_recuerdo(n) for n in nombres]:
                     nombres.append(nombre)
     return nombres
@@ -1569,10 +1570,22 @@ def proyectos_conocidos():
 
 def respuesta_inventario(pregunta):
     texto = normalizar_recuerdo(pregunta)
-    if not re.search(r"\b(?:cuantos proyectos (?:(?:mios|nuestros) )?(?:tenemos|tengo|hay registrados|recuerdas|conoces)|"
+    inventario = re.search(r"\b(?:cuantos proyectos (?:(?:mios|nuestros) )?(?:tenemos|tengo|hay registrados|recuerdas|conoces)|"
                      r"total de (?:mis |nuestros )?proyectos|(?:mis|nuestros) proyectos\b.*\b(?:pendientes|terminados)|"
-                     r"(?:lista|enumera|menciona) (?:todos )?(?:mis|nuestros|los) proyectos)\b", texto):
-        return None
+                     r"(?:lista|enumera|menciona) (?:todos )?(?:mis|nuestros|los) proyectos)\b", texto)
+    if not inventario:
+        sobre_estados = re.search(r"\b(?:estados?|pendientes|terminados|completados)\b", texto)
+        if not sobre_estados or re.search(r"\b(?:tareas?|actividades?)\b", texto):
+            return None
+        consulta_general = re.search(r"\b(?:mis|nuestros|tus|los) proyectos\b", texto)
+        seguimiento = re.match(r"^(?:y |entonces )?(?:de |en )?(?:cuales|cuantos)\b", texto)
+        if not (consulta_general and re.search(r"\b(?:que|cuales|cuantos|dime|estado de)\b", texto)):
+            if not seguimiento:
+                return None
+            reciente = cargar_historial_reciente(limite=1)
+            if not reciente or reciente[0]["role"] != "assistant" or not re.match(
+                    r"^Conozco \d+ proyectos\.", reciente[0]["content"]):
+                return None
     nombres = {normalizar_recuerdo(n): n for n in proyectos_conocidos()}
     recuerdos = [normalizar_recuerdo(contenido) for _, contenido in listar_recuerdos()]
     grupos = {"Terminados": [], "Pendientes": [], "Sin estado confirmado": []}
