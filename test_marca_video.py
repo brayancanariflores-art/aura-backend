@@ -30,3 +30,17 @@ class MarcaVideoTest(unittest.TestCase):
             self.assertIs(preparar_reel(base,"Cambia el logo del vaso",cliente,"modelo"), editar.return_value)
             editar.assert_called_once_with(base,"Cambia el logo del vaso",cliente,"modelo")
             self.assertFalse(cliente.mock_calls)
+
+    def test_guia_porcentual_seguida_hasta_su_ultimo_punto(self):
+        from marca_video import trayectoria_guiada
+        guia = "Reemplaza el logo. Guía de movimiento: [[1,10,20,30,50],[2,20,20,45,60]]"
+        self.assertEqual(trayectoria_guiada(guia, 200, 100, 3),
+                         [([[1, 20, 20, 40, 30], [2, 40, 20, 50, 40]], 2)])
+        self.assertIsNone(trayectoria_guiada("Reemplaza la marca del vaso", 200, 100, 3))
+
+    def test_guia_invalida_no_produce_una_edicion(self):
+        from marca_video import trayectoria_guiada
+        for guia in ("", "{}", "[[1,0,0,40,35],[1,0,0,40,35]]",
+                     "[[0,0,0,10,10],[2,-5,10,8,20]]"):
+            with self.subTest(guia=guia), self.assertRaises(ValueError):
+                trayectoria_guiada("Guía de movimiento: " + guia, 200, 100, 3)
