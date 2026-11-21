@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from estudio_medios import MEDIDAS, ejecutar, entrada_video, reel_narrado
 from formato_chat import lienzo_pedido
+from marca_video import editar_marca
 
 
 class PedidoReel(BaseModel):
@@ -26,6 +27,7 @@ class PedidoReel(BaseModel):
     id: UUID
     referencia: str | None = Field(default=None, max_length=700000)
     video_con_audio: str | None = Field(default=None, max_length=22369624)
+    marca_original: str | None = Field(default=None, max_length=1400000)
     anterior: UUID | None = None
 
 
@@ -46,6 +48,8 @@ def formato_del_pedido(texto):
 
 
 def preparar_reel(carpeta, texto, cliente, modelo):
+    if (carpeta / "marca.png").is_file():
+        return editar_marca(carpeta, texto, cliente, modelo)
     referencia = carpeta / "referencia.jpg"
     anterior = carpeta / "anterior.json"
     previo = json.loads(anterior.read_text()) if anterior.exists() else None
@@ -191,10 +195,18 @@ def conectar_reels(app, autorizar, cliente, modelo):
             archivo.replace(carpeta / "listo.mp4")
         except Exception as exc:
             logging.getLogger(__name__).warning("Reel fallido (%s)", type(exc).__name__)
-            (carpeta / "error").touch()
+            mensaje = "No pude localizar y sustituir la marca. Indica en qué momento y sobre qué objeto aparece." if (carpeta / "marca.png").is_file() else ""
+            (carpeta / "error").write_text(mensaje)
         finally:
+            conservar = {"pedido", "listo.mp4", "error"}
+            completado = (carpeta / "listo.mp4").is_file()
+            if completado:
+                conservar.update({"version.json", "escenas.jpg", "audio-original.m4a"})
+                if (carpeta / "marca.png").is_file():
+                    conservar.update({"marca.png", "entrada.mp4", "instruccion-marca", "pista-conservada"})
             for ruta in carpeta.iterdir():
-                if ruta.name not in {"pedido", "listo.mp4", "error"} and not ((carpeta / "listo.mp4").exists() and (ruta.name in {"version.json", "escenas.jpg", "audio-original.m4a"} or re.fullmatch(r"voz-[0-9a-f]{64}\.pcm", ruta.name))):
+                cache_voz = completado and re.fullmatch(r"voz-[0-9a-f]{64}\.pcm", ruta.name)
+                if ruta.name not in conservar and not cache_voz:
                     ruta.unlink(missing_ok=True)
 
     @app.post("/chat/reel", dependencies=[Depends(autorizar)], status_code=202)
@@ -221,9 +233,21 @@ def conectar_reels(app, autorizar, cliente, modelo):
                     im.load()
             except (OSError, ValueError, Image.DecompressionBombError):
                 raise HTTPException(422, "No pude leer los fotogramas de referencia.") from None
+        marca = b""
+        if pedido.marca_original is not None:
+            if not pedido.video_con_audio or pedido.referencia or pedido.anterior:
+                raise HTTPException(422, "Adjunta el video original y una imagen de la marca.")
+            try:
+                marca = base64.b64decode(pedido.marca_original, validate=True)
+                with Image.open(io.BytesIO(marca), formats=["JPEG", "PNG", "WEBP"]) as im:
+                    if max(im.size) > 2048:
+                        raise ValueError
+                    im.load()
+            except (OSError, ValueError, Image.DecompressionBombError):
+                raise HTTPException(422, "No pude leer el logo adjunto.") from None
         video = b""
         if pedido.video_con_audio is not None:
-            if not datos or pedido.anterior:
+            if not (datos or marca) or pedido.anterior:
                 raise HTTPException(422, "Adjunta el video de referencia para conservar el audio.")
             try:
                 video = base64.b64decode(pedido.video_con_audio, validate=True)
@@ -231,7 +255,7 @@ def conectar_reels(app, autorizar, cliente, modelo):
                     raise ValueError
             except ValueError:
                 raise HTTPException(422, "Usa un video de hasta 16 MiB.") from None
-        huella = hashlib.sha256(texto.encode() + (datos or b"") + video + str(pedido.anterior or "").encode()).hexdigest()
+        huella = hashlib.sha256(texto.encode() + (datos or b"") + marca + video + str(pedido.anterior or "").encode()).hexdigest()
         with (raiz / ".cola").open("a") as bloqueo:
             fcntl.flock(bloqueo, fcntl.LOCK_EX)
             activos = 0
@@ -253,7 +277,8 @@ def conectar_reels(app, autorizar, cliente, modelo):
                 raise HTTPException(429, "AURA ya está preparando dos videos.")
             else:
                 padre = raiz / str(pedido.anterior)
-                if pedido.anterior and not all((padre / n).is_file() for n in ("listo.mp4", "version.json", "escenas.jpg")):
+                previa_marca = pedido.anterior and all((padre / n).is_file() for n in ("listo.mp4", "marca.png", "entrada.mp4", "instruccion-marca"))
+                if pedido.anterior and not previa_marca and not all((padre / n).is_file() for n in ("listo.mp4", "version.json", "escenas.jpg")):
                     raise HTTPException(410, "La versión anterior caducó. Adjunta el reel para continuar.")
                 carpeta.mkdir(mode=0o700)
                 try:
@@ -261,7 +286,15 @@ def conectar_reels(app, autorizar, cliente, modelo):
                         (carpeta / "entrada.mp4").write_bytes(video)
                     if datos:
                         (carpeta / "referencia.jpg").write_bytes(datos)
-                    if pedido.anterior:
+                    if marca:
+                        (carpeta / "marca.png").write_bytes(marca)
+                        (carpeta / "instruccion-marca").write_text(texto)
+                    if previa_marca:
+                        for nombre in ("marca.png", "entrada.mp4"):
+                            shutil.copyfile(padre / nombre, carpeta / nombre)
+                        texto = (padre / "instruccion-marca").read_text()[:4000] + "\nAjuste solicitado: " + texto
+                        (carpeta / "instruccion-marca").write_text(texto[-8000:])
+                    elif pedido.anterior:
                         if (padre / "audio-original.m4a").is_file():
                             shutil.copyfile(padre / "audio-original.m4a", carpeta / "audio-original.m4a")
                         guion_previo = json.loads((padre / "version.json").read_text())["guion"]
@@ -286,7 +319,12 @@ def conectar_reels(app, autorizar, cliente, modelo):
             raise HTTPException(404, "El reel ya no está disponible.")
         if (carpeta / "listo.mp4").is_file():
             tipo = "original" if (carpeta / "audio-original.m4a").is_file() else "sintetica"
+            if (carpeta / "marca.png").is_file():
+                tipo = "original" if (carpeta / "pista-conservada").is_file() else "sin_audio"
             return FileResponse(carpeta / "listo.mp4", media_type="video/mp4", headers={**privado, "X-Aura-Audio": tipo})
         if (carpeta / "error").exists() or time.time() - carpeta.stat().st_mtime > 600:
+            fallo = carpeta / "error"
+            if fallo.is_file() and fallo.read_text().strip():
+                raise HTTPException(422, fallo.read_text())
             raise HTTPException(502, "No se pudo completar el reel.")
         return JSONResponse({"estado": "preparando"}, status_code=202, headers=privado)
