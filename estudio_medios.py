@@ -1,5 +1,6 @@
 """Preparación de copias para redes. Solo se abren archivos locales del estudio."""
 import io
+import html
 import math
 import re
 import subprocess
@@ -135,10 +136,17 @@ def editar(ruta, carpeta, info, plan, formato):
     return destino, f"Clip de {duracion:.1f} s desde {inicio:.1f} s, {ancho} × {alto}, con titular inicial."
 
 
-def reel_narrado(ruta, carpeta, info, plan, formato, frases, narrar, *, escenas=None):
+def tiempo_srt(segundos):
+    minutos, resto = divmod(round(segundos * 1000), 60000)
+    segundos, milisegundos = divmod(resto, 1000)
+    return f"00:{minutos:02}:{segundos:02},{milisegundos:03}"
+
+
+def reel_narrado(ruta, carpeta, info, plan, formato, frases, narrar, *, escenas=None, medidas=None,
+                 subtitulos=None, idioma_voz="und", idioma_subtitulos=None):
     """Cada subtítulo dura exactamente lo que dura su fragmento de narración PCM."""
     import wave
-    medidas = MEDIDAS[formato]
+    medidas = medidas or MEDIDAS[formato]
     w, h = medidas
     with wave.open(str(carpeta / "voz.wav"), "wb") as voz:
         voz.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
@@ -150,7 +158,7 @@ def reel_narrado(ruta, carpeta, info, plan, formato, frases, narrar, *, escenas=
             if not audio or len(audio) % 2 or fin > 60:
                 raise ValueError("La narración no cabe en un reel de un minuto.")
             voz.writeframes(audio)
-            capa = rotulo(medidas, frase)
+            capa = rotulo(medidas, frase) if subtitulos is None else Image.new("RGBA", medidas)
             ImageDraw.Draw(capa).text((w * .08, h * .08), "Voz generada por IA", fill="white",
                                       stroke_width=2, stroke_fill="#202030", font=ImageFont.load_default(size=20))
             capa.save(carpeta / f"sub-{i}.png")
@@ -188,10 +196,24 @@ def reel_narrado(ruta, carpeta, info, plan, formato, frases, narrar, *, escenas=
     for i, (desde, hasta) in enumerate(marcas):
         entradas += ["-i", str(carpeta / f"sub-{i}.png")]
         filtros.append(f"[v{i}][{i+audio_idx+1}:v]overlay=0:0:enable='gte(t,{desde})*lt(t,{hasta})'[v{i+1}]")
+    opciones_subtitulos = []
+    if subtitulos:
+        if len(subtitulos) != len(marcas):
+            raise ValueError("Cada escena necesita su subtítulo.")
+        archivo_srt = carpeta / "subtitulos.srt"
+        bloques = []
+        for indice, ((desde, hasta), linea) in enumerate(zip(marcas, subtitulos), start=1):
+            contenido = html.escape(" ".join(linea.split()), quote=False)
+            bloques.append(f"{indice}\n{tiempo_srt(desde)} --> {tiempo_srt(hasta)}\n{contenido}\n")
+        archivo_srt.write_text("\n".join(bloques), encoding="utf-8")
+        entradas += ["-f", "srt", "-i", str(archivo_srt)]
+        opciones_subtitulos = ["-map", f"{audio_idx + len(marcas) + 1}:s:0", "-c:s", "mov_text",
+                               "-metadata:s:s:0", f"language={idioma_subtitulos}", "-disposition:s:0", "default"]
     destino = carpeta / "pieza.mp4"
     ejecutar(["-v", "error", "-y", *entradas, "-filter_complex", ";".join(filtros),
               "-map", f"[v{len(marcas)}]", "-map", f"{audio_idx}:a:0", "-t", str(inicio), "-threads", "2",
               "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-maxrate", "2000k", "-bufsize", "4000k",
               "-c:a", "aac", "-b:a", "96k", "-pix_fmt", "yuv420p", "-map_metadata", "-1",
+              "-metadata:s:a:0", f"language={idioma_voz}", *opciones_subtitulos,
               "-movflags", "+faststart", str(destino)], tiempo=120)
-    return destino, f"Reel de {inicio:.1f} s con voz sintética y {len(marcas)} subtítulos sincronizados por frase."
+    return destino, f"Reel de {inicio:.1f} s con voz sintética y {len(marcas) if subtitulos is None else len(subtitulos)} subtítulos."

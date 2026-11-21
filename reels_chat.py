@@ -17,7 +17,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from PIL import Image
 from pydantic import BaseModel, Field
 
-from estudio_medios import reel_narrado
+from estudio_medios import MEDIDAS, reel_narrado
+from formato_chat import lienzo_pedido
 
 
 class PedidoReel(BaseModel):
@@ -43,25 +44,40 @@ def formato_del_pedido(texto):
 
 def preparar_reel(carpeta, texto, cliente, modelo):
     formato = formato_del_pedido(texto)
+    medidas = lienzo_pedido(texto, video=True) or MEDIDAS[formato]
     plan = cliente.with_options(timeout=35, max_retries=0).chat.completions.create(
         model=modelo, response_format={"type": "json_object"}, messages=[
             {"role": "system", "content": (
                 "Realiza un video corto sobre el tema solicitado, respetando el idioma, el estilo y "
                 "los nombres. Puede ser ficción, un relato personal, educación, una receta o publicidad. "
-                "Aplica tono comercial solo si se pide. Devuelve JSON con escenas: tres objetos con "
-                "visual (descripción de una toma) y frase (una frase breve para voz y subtítulo). "
+                "Aplica tono comercial solo si se pide. Devuelve JSON con idioma_voz e idioma_subtitulos "
+                "(códigos ISO 639-2 de tres letras). Si se pide sin subtítulos, idioma_subtitulos es null. "
+                "La voz usa el idioma elegido o español por defecto. Los subtítulos usan su propio idioma "
+                "elegido o, por defecto, el de la voz. Incluye escenas, exactamente tres objetos con "
+                "visual (descripción de una toma), frase (narración breve en el idioma de la voz) y "
+                "subtitulo (traducción fiel y breve de la frase al idioma de los subtítulos, o null si se omiten). "
                 "Usa la petición actual como prioridad y el contexto solo para resolver referencias. "
                 "No inventes precios, direcciones ni testimonios.")},
             {"role": "user", "content": texto}])
-    escenas = json.loads(plan.choices[0].message.content)["escenas"]
+    guion = json.loads(plan.choices[0].message.content)
+    escenas = guion["escenas"]
+    idioma_voz = guion["idioma_voz"]
+    idioma_subtitulos = guion["idioma_subtitulos"]
+    if not re.fullmatch("[a-z]{3}", idioma_voz) or (
+        idioma_subtitulos is not None and not re.fullmatch("[a-z]{3}", idioma_subtitulos)
+    ):
+        raise ValueError("Idiomas de narración o subtítulos inválidos")
     if not isinstance(escenas, list) or len(escenas) != 3:
         raise ValueError("Guion incompleto")
+    campos = [("visual", 1000), ("frase", 150)]
+    if idioma_subtitulos:
+        campos.append(("subtitulo", 240))
     for escena in escenas:
-        for campo, limite in (("visual", 1000), ("frase", 150)):
+        for campo, limite in campos:
             valor = escena[campo]
             if not isinstance(valor, str) or not 0 < len(valor.strip()) <= limite:
                 raise ValueError("Escena incompleta")
-    horizontal = formato == "horizontal"
+    horizontal = medidas[0] > medidas[1]
     if horizontal:
         lienzo = "1024x1536"
         paneles = "Tres viñetas panorámicas 16:9 de igual altura apiladas de arriba abajo, una por fila."
@@ -70,7 +86,8 @@ def preparar_reel(carpeta, texto, cliente, modelo):
         paneles = "Tres viñetas verticales 9:16 de igual ancho de izquierda a derecha, una por columna."
     imagen = cliente.with_options(timeout=150, max_retries=0).images.generate(
         model="gpt-image-1.5", size=lienzo, quality="medium", output_format="jpeg", n=1,
-        prompt=(paneles + " Llena todo el lienzo, sin márgenes, separadores ni rótulos. "
+        prompt=(paneles + f" Cada panel se reencuadrará a {medidas[0]} por {medidas[1]}; centra el motivo. "
+                "Llena todo el lienzo, sin márgenes, separadores ni rótulos. "
                 "Mantén la continuidad visual, el estilo y los personajes entre escenas. "
                 + "\n".join(f"Panel {i+1}: {e['visual']}" for i, e in enumerate(escenas))))
     with Image.open(io.BytesIO(base64.b64decode(imagen.data[0].b64_json, validate=True))) as tira:
@@ -91,8 +108,10 @@ def preparar_reel(carpeta, texto, cliente, modelo):
         return cliente.with_options(timeout=35, max_retries=0).audio.speech.create(
             model="gpt-4o-mini-tts", voice="coral", response_format="pcm", input=frase).content
 
+    subtitulos = [e["subtitulo"] for e in escenas] if idioma_subtitulos else []
     return reel_narrado(tomas[0], carpeta, {"tipo": "foto"}, {}, formato,
-                        [e["frase"] for e in escenas], narrar, escenas=tomas)[0]
+                        [e["frase"] for e in escenas], narrar, escenas=tomas, medidas=medidas,
+                        subtitulos=subtitulos, idioma_voz=idioma_voz, idioma_subtitulos=idioma_subtitulos)[0]
 
 
 def conectar_reels(app, autorizar, cliente, modelo):
@@ -119,6 +138,10 @@ def conectar_reels(app, autorizar, cliente, modelo):
         texto = pedido.texto.strip()
         if not texto:
             raise HTTPException(422, "Describe el video.")
+        try:
+            lienzo_pedido(texto, video=True)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from None
         carpeta = raiz / str(pedido.id)
         huella = hashlib.sha256(texto.encode()).hexdigest()
         with (raiz / ".cola").open("a") as bloqueo:
