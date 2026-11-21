@@ -159,8 +159,11 @@ def reel_narrado(ruta, carpeta, info, plan, formato, frases, narrar, *, escenas=
                 raise ValueError("La narración no cabe en un reel de un minuto.")
             voz.writeframes(audio)
             capa = rotulo(medidas, frase) if subtitulos is None else Image.new("RGBA", medidas)
-            ImageDraw.Draw(capa).text((w * .08, h * .08), "Voz generada por IA", fill="white",
-                                      stroke_width=2, stroke_fill="#202030", font=ImageFont.load_default(size=20))
+            if plan.get("marca") and i == len(frases) - 1:
+                capa.alpha_composite(rotulo(medidas, plan["marca"]))
+            if not plan.get("credito_en_chat"):
+                ImageDraw.Draw(capa).text((w * .08, h * .08), "Voz generada por IA", fill="white",
+                                          stroke_width=2, stroke_fill="#202030", font=ImageFont.load_default(size=20))
             capa.save(carpeta / f"sub-{i}.png")
             marcas.append((inicio, fin))
             inicio = fin
