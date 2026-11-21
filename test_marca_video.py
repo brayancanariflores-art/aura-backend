@@ -44,3 +44,11 @@ class MarcaVideoTest(unittest.TestCase):
                      "[[0,0,0,10,10],[2,-5,10,8,20]]"):
             with self.subTest(guia=guia), self.assertRaises(ValueError):
                 trayectoria_guiada("Guía de movimiento: " + guia, 200, 100, 3)
+
+    def test_el_revisor_no_entrega_una_trayectoria_inconsistente(self):
+        from marca_video import validar_acuerdo_visual
+        propuesta = {0: (10, 20, 60, 80), 1: (12, 21, 62, 81)}
+        validar_acuerdo_visual(propuesta, {0: (11, 22, 60, 82), 1: (14, 23, 60, 80)})
+        for mal in ({}, {0: propuesta[0]}, {i: (300, 300, 350, 360) for i in propuesta}):
+            with self.subTest(mal=mal), self.assertRaises(ValueError):
+                validar_acuerdo_visual(propuesta, mal)
