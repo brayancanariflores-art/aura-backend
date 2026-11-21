@@ -4,3 +4,6 @@ openai
 chromadb
 yfinance
 pydantic
+Pillow>=10.1
+imageio-ffmpeg>=0.5
+python-multipart>=0.0.20

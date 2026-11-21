@@ -4682,6 +4682,17 @@ def autonomia_investigaciones(limite: int = 20, _auth=Depends(autorizar)):
             (limite,)).fetchall()
     return {'investigaciones': [dict(f) for f in filas]}
 
+from estudio import conectar_estudio
+
+
+def memoria_editorial(nombre):
+    nombre_normal = normalizar_recuerdo(nombre)
+    return [contenido for _, contenido in listar_recuerdos()
+            if nombre_normal in normalizar_recuerdo(contenido) and es_informacion_segura(contenido)][:8]
+
+
+estudio_redes = conectar_estudio(app, DATA_DIR, autorizar, memoria_editorial, ai_client, MODEL)
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
