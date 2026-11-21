@@ -292,6 +292,9 @@ def editar_marca(carpeta, texto, cliente, modelo):
     with Image.open(io.BytesIO(prueba)) as im:
         w,h = im.size
     grupos = trayectoria_guiada(texto, w, h, info["duracion"])
+    if grupos is None and re.search(r"\b(?:al|el|hacia el|sobre el)\s+final\b", texto, re.I) and not re.search(r"\b(?:desde|a partir de)\b",texto,re.I):
+        from seguimiento_marca import buscar_al_final
+        grupos = buscar_al_final(clip, texto, cliente, modelo, info["duracion"], (w,h))
     if grupos is None:
         cajas, fps, total = localizar(clip, texto, cliente, modelo, info["duracion"])
         grupos = validar_cajas(cajas, fps, total, w, h, info["duracion"])
