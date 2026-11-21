@@ -56,9 +56,26 @@ def localizar(clip, instruccion, cliente, modelo, duracion):
     comienzo = math.ceil(desde * fps)
     propuestas = consultar_vistas(servicio, modelo, instruccion, datos, total, fps, comienzo)
     revisadas = consultar_vistas(servicio, modelo, instruccion, datos, total, fps, comienzo, propuestas)
+    validar_acuerdo_visual(propuestas, revisadas)
     log.info("Localización visual: %d propuestas, %d confirmadas", len(propuestas), len(revisadas))
     return [[i, x1*.216, y1*.312, x2*.216, y2*.312]
             for i, (x1, y1, x2, y2) in sorted(revisadas.items())], fps, total
+
+
+def validar_acuerdo_visual(propuestas, revisadas):
+    """Descartar ediciones si las dos lecturas discrepan sobre dónde o cuándo cubrir."""
+    todos = set(propuestas) | set(revisadas)
+    coincidencias = 0
+    for i in propuestas.keys() & revisadas.keys():
+        a, b = propuestas[i], revisadas[i]
+        ancho = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+        alto = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+        inter = ancho * alto
+        union = (a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - inter
+        if union and inter / union >= 0.55:
+            coincidencias += 1
+    if not todos or coincidencias < 0.75 * len(todos):
+        raise ValueError("La posición de la marca requiere una guía de movimiento.")
 
 
 def vista_de_revision(imagen, caja):
