@@ -1,4 +1,5 @@
 import json
+from diagnostico_autonomia import diagnosticar
 from urllib.parse import urlparse
 import hmac
 from difflib import SequenceMatcher
@@ -4570,38 +4571,7 @@ def autonomia_capacidades(_auth=Depends(autorizar)):
 @app.get('/autonomia/diagnostico', tags=['AURA - Autonomia supervisada'])
 def autonomia_diagnostico(_auth=Depends(autorizar)):
     """Verifica dependencias y persistencia sin ejecutar misiones."""
-    bases = {}
-    for nombre, ruta in (
-        ('historial', HISTORY_DB), ('memoria', MEMORY_DB),
-        ('agente', AGENT_DB),
-    ):
-        try:
-            # URI read-only: no crea una base accidentalmente.
-            with sqlite3.connect('file:' + urllib.parse.quote(os.path.abspath(ruta), safe='/') + '?mode=ro', uri=True, timeout=3) as conn:
-                resultado = conn.execute('PRAGMA quick_check').fetchone()[0]
-            bases[nombre] = {'accesible': True, 'integridad': resultado == 'ok'}
-        except (sqlite3.Error, OSError) as exc:
-            bases[nombre] = {'accesible': False, 'integridad': False,
-                             'tipo_error': type(exc).__name__}
-    try:
-        with agente_db() as conn:
-            objetivos = conn.execute('SELECT COUNT(*) FROM objetivos_autonomos WHERE activo=1').fetchone()[0]
-            pendientes = conn.execute("SELECT COUNT(*) FROM ciclos_autonomos WHERE estado='pendiente_revision_humana'").fetchone()[0]
-    except sqlite3.Error:
-        objetivos, pendientes = None, None
-    preparado = (bool(api_key) and bool(AURA_ACCESS_TOKEN)
-                 and all(b['integridad'] for b in bases.values()))
-    return {
-        'preparacion_basica': preparado,
-        'modelo_configurado': bool(api_key),
-        'autenticacion_configurada': bool(AURA_ACCESS_TOKEN),
-        'bases': bases,
-        'objetivos_activos': objetivos,
-        'ciclos_pendientes_revision': pendientes,
-        'ejecucion_continua': 'requiere_disparador_externo',
-        'ejecucion_externa_automatica': False,
-        'advertencia': 'Diagnostico basico; no certifica seguridad ni disponibilidad en produccion.'
-    }
+    return diagnosticar(HISTORY_DB, MEMORY_DB, AGENT_DB, bool(api_key), bool(AURA_ACCESS_TOKEN))
 
 
 
