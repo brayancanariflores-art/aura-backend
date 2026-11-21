@@ -1691,12 +1691,70 @@ def respuesta_inventario(pregunta):
     return " ".join(lineas)
 
 
+PATRON_OBJETIVO_DOCUMENTAL = re.compile(r"\b(?:objetivos?|metas?)\b")
+PALABRAS_ROTULO_OBJETIVO = set(
+    "el la los las de del para proyecto objetivo objetivos meta metas principal principales "
+    "general generales especifico especificos especifica especificas".split()
+)
+
+
+def citar_objetivo_documental(archivo, lineas, patrones, solicitados):
+    def proyectos_en(texto):
+        normal = normalizar_recuerdo(texto.replace("_", " "))
+        return {nombre for nombre, patron in patrones.items() if patron.search(normal)}
+
+    por_archivo = proyectos_en(archivo.stem)
+    secciones = []
+    for numero, original in enumerate(lineas, 1):
+        linea = original.strip()
+        if not linea:
+            continue
+        mencionados = proyectos_en(linea)
+        normal = normalizar_recuerdo(linea)
+        titulo = re.match(r"^(#{1,6})\s+", linea)
+        titulo_plano = any(patrones[n].fullmatch(normal.removeprefix("proyecto ")) for n in mencionados)
+        if titulo or titulo_plano:
+            nivel = len(titulo[1]) if titulo else 1
+            while secciones and secciones[-1][0] >= nivel:
+                secciones.pop()
+            heredados = secciones[-1][1] if secciones else por_archivo
+            secciones.append((nivel, mencionados or heredados))
+        contexto = mencionados or (secciones[-1][1] if secciones else por_archivo)
+        if not contexto or not contexto.issubset(solicitados):
+            continue
+        etiqueta = PATRON_OBJETIVO_DOCUMENTAL.search(normal)
+        if not etiqueta:
+            continue
+        rotulo = normal
+        for nombre in mencionados:
+            rotulo = patrones[nombre].sub("", rotulo)
+        if set(rotulo.split()) - PALABRAS_ROTULO_OBJETIVO:
+            return (2, archivo.name, numero, linea[:500])
+        for siguiente, contenido in enumerate(lineas[numero:], numero + 1):
+            contenido = contenido.strip()
+            if not contenido:
+                continue
+            if (not contenido.startswith("#") and not re.match(r"^[^:]{1,40}:", contenido)
+                    and not (proyectos_en(contenido) - solicitados)):
+                return (1, archivo.name, siguiente, contenido[:500])
+            break
+    return None
+
+
 def buscar_documentos_locales(pregunta):
     carpeta = Path(DATA_DIR) / "documentos"
     if carpeta.is_symlink() or not carpeta.is_dir():
         return []
     palabras = tokens_contextuales(pregunta) - {"buscar", "busca", "documentos", "archivos", "documento", "archivo"}
     resultados = []
+    consulta = normalizar_recuerdo(pregunta)
+    patrones = {}
+    if PATRON_OBJETIVO_DOCUMENTAL.search(consulta):
+        for nombre in proyectos_conocidos():
+            clave = normalizar_recuerdo(nombre).removeprefix("proyecto ")
+            if clave:
+                patrones[nombre] = re.compile(r"\b" + re.escape(clave) + r"\b")
+    solicitados = {nombre for nombre, patron in patrones.items() if patron.search(consulta)}
     for archivo in carpeta.iterdir():
         if (archivo.name.startswith(".") or archivo.suffix.lower() not in {".md", ".txt"}
                 or archivo.is_symlink() or not archivo.is_file()):
@@ -1708,6 +1766,11 @@ def buscar_documentos_locales(pregunta):
                 continue
             lineas = datos.decode("utf-8").splitlines()
         except (OSError, UnicodeError):
+            continue
+        if solicitados:
+            cita = citar_objetivo_documental(archivo, lineas, patrones, solicitados)
+            if cita:
+                resultados.append(cita)
             continue
         por_nombre = palabras & tokens_contextuales(archivo.stem)
         mejor = None
@@ -3809,7 +3872,9 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
         guardar_en_historial("assistant", cambio["respuesta"])
         return cambio
     directa = respuesta_inventario(pregunta)
-    consulta_documental = re.search(r"\b(?:archivos?|documentos?)\b", normal_pregunta)
+    consulta_documental = re.search(
+        r"\b(?:archivos?|documentos?|(?:segun|en|del) (?:el |los )?informes?)\b", normal_pregunta
+    )
     if directa is None and (consulta_documental or proyectos_mencionados(pregunta)):
         citas = buscar_documentos_locales(pregunta)
         if consulta_documental:
