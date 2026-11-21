@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 FOTOS = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEOS = {".mp4", ".mov", ".m4v"}
-MEDIDAS = {"vertical": (720, 1280), "cuadrado": (960, 960)}
+MEDIDAS = {"vertical": (720, 1280), "horizontal": (1280, 720), "cuadrado": (960, 960)}
 MAX_PIXELES = 24_000_000
 
 
@@ -79,9 +79,9 @@ def rotulo(medidas, texto):
     capa = Image.new("RGBA", medidas)
     pincel = ImageDraw.Draw(capa)
     try:
-        fuente = ImageFont.truetype("DejaVuSans-Bold.ttf", max(25, w // 20))
+        fuente = ImageFont.truetype("DejaVuSans-Bold.ttf", max(25, min(w, h) // 20))
     except OSError:
-        fuente = ImageFont.load_default(size=max(25, w // 20))
+        fuente = ImageFont.load_default(size=max(25, min(w, h) // 20))
     lineas = []
     actual = ""
     for palabra in texto.split():
@@ -135,7 +135,7 @@ def editar(ruta, carpeta, info, plan, formato):
     return destino, f"Clip de {duracion:.1f} s desde {inicio:.1f} s, {ancho} × {alto}, con titular inicial."
 
 
-def reel_narrado(ruta, carpeta, info, plan, formato, frases, narrar):
+def reel_narrado(ruta, carpeta, info, plan, formato, frases, narrar, *, escenas=None):
     """Cada subtítulo dura exactamente lo que dura su fragmento de narración PCM."""
     import wave
     medidas = MEDIDAS[formato]
@@ -156,22 +156,41 @@ def reel_narrado(ruta, carpeta, info, plan, formato, frases, narrar):
             capa.save(carpeta / f"sub-{i}.png")
             marcas.append((inicio, fin))
             inicio = fin
-    if info["tipo"] == "foto":
-        foto = carpeta / "base.jpg"
-        abrir_foto(ruta).save(foto)
-        entradas = ["-loop", "1", "-framerate", "24", "-i", str(foto)]
+    entradas = []
+    if escenas:
+        if len(escenas) != len(marcas):
+            raise ValueError("Cada frase necesita su escena.")
+        for escena in escenas:
+            entradas += ["-i", str(escena)]
+        filtros = []
+        for i, (desde, hasta) in enumerate(marcas):
+            frames = math.ceil(hasta * 24) - math.ceil(desde * 24)
+            filtros.append(
+                f"[{i}:v]scale={w*2}:{h*2}:force_original_aspect_ratio=increase,"
+                f"crop={w*2}:{h*2},zoompan=z='1+0.06*on/{max(frames, 1)}':"
+                f"x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':d={max(frames, 1)}:s={w}x{h}:fps=24,"
+                f"setsar=1[escena{i}]")
+        pistas = "".join(f"[escena{i}]" for i in range(len(escenas)))
+        filtros.append(f"{pistas}concat=n={len(escenas)}:v=1:a=0[v0]")
+        audio_idx = len(escenas)
     else:
-        desde = min(max(0, plan["inicio_segundos"]), max(0, info["duracion"] - inicio))
-        entradas = ["-stream_loop", "-1", "-ss", str(desde), *entrada_video(ruta)]
+        if info["tipo"] == "foto":
+            foto = carpeta / "base.jpg"
+            abrir_foto(ruta).save(foto)
+            entradas = ["-loop", "1", "-framerate", "24", "-i", str(foto)]
+        else:
+            desde = min(max(0, plan["inicio_segundos"]), max(0, info["duracion"] - inicio))
+            entradas = ["-stream_loop", "-1", "-ss", str(desde), *entrada_video(ruta)]
+        filtros = [f"[0:v:0]fps=24,scale={w}:{h}:force_original_aspect_ratio=decrease,"
+                   f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=0x121725,setsar=1[v0]"]
+        audio_idx = 1
     entradas += ["-i", str(carpeta / "voz.wav")]
-    filtros = [f"[0:v:0]fps=24,scale={w}:{h}:force_original_aspect_ratio=decrease,"
-               f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=0x121725,setsar=1[v0]"]
     for i, (desde, hasta) in enumerate(marcas):
         entradas += ["-i", str(carpeta / f"sub-{i}.png")]
-        filtros.append(f"[v{i}][{i+2}:v]overlay=0:0:enable='gte(t,{desde})*lt(t,{hasta})'[v{i+1}]")
+        filtros.append(f"[v{i}][{i+audio_idx+1}:v]overlay=0:0:enable='gte(t,{desde})*lt(t,{hasta})'[v{i+1}]")
     destino = carpeta / "pieza.mp4"
     ejecutar(["-v", "error", "-y", *entradas, "-filter_complex", ";".join(filtros),
-              "-map", f"[v{len(marcas)}]", "-map", "1:a:0", "-t", str(inicio), "-threads", "2",
+              "-map", f"[v{len(marcas)}]", "-map", f"{audio_idx}:a:0", "-t", str(inicio), "-threads", "2",
               "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-maxrate", "2000k", "-bufsize", "4000k",
               "-c:a", "aac", "-b:a", "96k", "-pix_fmt", "yuv420p", "-map_metadata", "-1",
               "-movflags", "+faststart", str(destino)], tiempo=120)
