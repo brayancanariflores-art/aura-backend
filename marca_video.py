@@ -3,6 +3,8 @@ import base64
 import io
 import json
 import math
+import logging
+import re
 from pathlib import Path
 import subprocess
 from bisect import bisect_right
@@ -12,31 +14,36 @@ from PIL import Image, ImageDraw, ImageOps
 from estudio_medios import ejecutar, entrada_video, ffmpeg, inspeccionar
 
 
-# El servicio exige esta estructura para que pueda validar cada trayectoria
-# antes de componer el logo sobre los fotogramas originales.
+# Se solicita un objeto con campos nombrados para cada vista. Los ejes son
+# relativos al cuadro completo de video y no dependen de mosaicos ni relleno.
+CAMPOS_CAJA = ("fotograma", "izquierda", "arriba", "derecha", "abajo")
 FORMATO_TRAYECTORIA = {
     "type": "json_schema",
     "json_schema": {
-        "name": "trayectoria_marca",
+        "name": "localizacion_visual",
         "strict": True,
         "schema": {
             "type": "object",
-            "properties": {
-                "cajas": {
-                    "type": "array",
-                    "items": {"type": "array", "items": {"type": "integer"}},
-                }
-            },
-            "required": ["cajas"],
-            "additionalProperties": False,
+            "properties": {"cajas": {"type": "array", "items": {
+                "type": "object",
+                "properties": {k: {"type": "integer"} for k in CAMPOS_CAJA},
+                "required": list(CAMPOS_CAJA), "additionalProperties": False,
+            }}},
+            "required": ["cajas"], "additionalProperties": False,
         },
     },
 }
+log = logging.getLogger(__name__)
 
 
 def localizar(clip, instruccion, cliente, modelo, duracion):
-    # Muestrear el giro de objetos pequeños sin enviar más de sesenta vistas.
     fps = min(4, 60 / duracion)
+    # Si la orden trae un inicio explícito, las imágenes de otras tomas no
+    # deben influir en el reconocimiento de la marca.
+    inicio = re.search(r"(?:desde|a partir de)\s+(?:el\s+)?(?:segundo\s+)?(\d+(?:[.,]\d+)?)\s*(?:s(?:egundos?)?\b|hasta)", instruccion, re.I)
+    desde = float(inicio[1].replace(",", ".")) if inicio else 0.0
+    if not 0 <= desde < duracion:
+        raise ValueError("El inicio está fuera del video.")
     datos = ejecutar(["-v", "error", *entrada_video(clip), "-map", "0:v:0", "-an",
                       "-vf", f"fps={fps:.6f}:round=up,scale=216:312:force_original_aspect_ratio=decrease,pad=216:312:(ow-iw)/2:(oh-ih)/2",
                       "-frames:v", "62", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"],
@@ -45,40 +52,71 @@ def localizar(clip, instruccion, cliente, modelo, duracion):
     total = len(datos) // tam
     if not total:
         raise ValueError("No se pudo leer el video.")
-    partes = [{"type": "text", "text": instruccion}]
-    for inicio in range(0, total, 8):
-        lote = min(8, total - inicio)
-        hoja = Image.new("RGB", (4 * 216, math.ceil(lote / 4) * 332))
-        for j in range(lote):
-            i = inicio + j
+    cajas = []
+    servicio = cliente.with_options(timeout=65, max_retries=1)
+    for primer in range(math.ceil(desde * fps), total, 12):
+        partes = [{"type": "text", "text": instruccion}]
+        ultimo = min(primer + 12, total)
+        for i in range(primer, ultimo):
             foto = Image.frombytes("RGB", (216, 312), datos[i*tam:(i+1)*tam])
-            x, y = j % 4 * 216, j // 4 * 332
-            hoja.paste(foto, (x, y))
-            ImageDraw.Draw(hoja).text((x + 4, y + 312), f"F{i}", fill="white")
-        buf = io.BytesIO()
-        hoja.save(buf, format="JPEG", quality=86)
-        url = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
-        partes.append({"type": "image_url", "image_url": {"url": url, "detail": "high"}})
-    respuesta = cliente.with_options(timeout=85, max_retries=1).chat.completions.create(
-        model=modelo, response_format=FORMATO_TRAYECTORIA, messages=[
-            {"role": "system", "content":
-             "Localiza exclusivamente la marca existente que el usuario quiere sustituir en el objeto y las tomas indicados. "
-             "Cada celda contiene un fotograma de 216 por 312 píxeles, incluida su banda negra si hay encuadre, "
-             "seguido de la etiqueta F y su número. Las coordenadas son locales a la celda y excluyen la etiqueta. "
-             "Para cada fotograma donde aparece esa marca, devuelve [numero,x_izquierda,y_arriba,x_derecha,y_abajo] "
-             "en píxeles. Ajusta los bordes al distintivo completo incluida su ilustración. Sigue su perspectiva y "
-             "la rotación del objeto. Omite los fotogramas donde no se ve, está tapado o hay otra marca. "
-             "Si se pide el vaso del final, omite las marcas del surtidor, las otras tomas y otros vasos. "
-             "Devuelve solo JSON con la lista cajas. Si no puedes identificarla, devuelve la lista vacía."},
-            {"role": "user", "content": partes}])
-    contenido = respuesta.choices[0].message.content
-    if not contenido:
-        raise ValueError("El análisis visual no devolvió una trayectoria.")
-    resultado = json.loads(contenido)
-    if not isinstance(resultado, dict) or not isinstance(resultado.get("cajas"), list):
-        raise ValueError("El análisis visual devolvió una trayectoria ilegible.")
-    cajas = resultado["cajas"]
-    return cajas, fps, total
+            buf = io.BytesIO()
+            foto.save(buf, format="JPEG", quality=90)
+            url = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+            partes.extend([{"type": "text", "text": f"Fotograma {i}, tiempo {i/fps:.2f} segundos"},
+                           {"type": "image_url", "image_url": {"url": url, "detail": "high"}}])
+        respuesta = servicio.chat.completions.create(
+            model=modelo, response_format=FORMATO_TRAYECTORIA, messages=[
+                {"role": "system", "content":
+                 "Eres un localizador de objetos. Cada imagen es un fotograma completo, precedido de su número. "
+                 "Encuentra la marca que ya aparece impresa en el objeto descrito en la orden. Usa el número de "
+                 "fotograma indicado. Devuelve la caja ajustada al dibujo completo visible. Coordenadas enteras "
+                 "de 0 a 1000 en ambos ejes: izquierda y derecha como fracción del ancho, arriba y abajo como "
+                 "fracción del alto. Incluye las bandas negras en el sistema de coordenadas. Un registro por "
+                 "fotograma visible. Omite los que no muestran la marca en ese objeto. Solo JSON."},
+                {"role": "user", "content": partes}])
+        contenido = respuesta.choices[0].message.content
+        if not contenido:
+            raise ValueError("Análisis visual vacío.")
+        valores = json.loads(contenido).get("cajas")
+        if not isinstance(valores, list):
+            raise ValueError("Respuesta de localización ilegible.")
+        for fila in valores:
+            if not isinstance(fila, dict) or not all(type(fila.get(k)) is int for k in CAMPOS_CAJA):
+                continue
+            i, x1, y1, x2, y2 = (fila[k] for k in CAMPOS_CAJA)
+            if primer <= i < ultimo and 0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000:
+                cajas.append([i, x1*.216, y1*.312, x2*.216, y2*.312])
+    unicas = {fila[0]: fila for fila in cajas}
+    log.info("Localización visual: %d fotogramas con marca de %d", len(unicas), total)
+    return [unicas[i] for i in sorted(unicas)], fps, total
+
+
+def trayectoria_guiada(texto, ancho, alto, duracion):
+    """Puntos de edición opcionales aportados en la orden, con posiciones porcentuales."""
+    marcador = "guía de movimiento:"
+    if marcador not in texto.lower():
+        return None
+    linea = texto.lower().rsplit(marcador, 1)[1].partition("\n")[0].strip()
+    try:
+        filas = json.loads(linea)
+    except (ValueError, RecursionError):
+        raise ValueError("La guía de movimiento no es válida.") from None
+    if not isinstance(filas, list) or not 2 <= len(filas) <= 160:
+        raise ValueError("La guía debe indicar al menos el inicio y el fin.")
+    grupo = []
+    for fila in filas:
+        if not isinstance(fila, list) or len(fila) != 5 or not all(
+            type(v) in (float, int) and math.isfinite(v) for v in fila
+        ):
+            raise ValueError("La guía contiene un punto inválido.")
+        t, x1, y1, x2, y2 = fila
+        if not (0 <= t <= duracion + .05 and 0 <= x1 < x2 <= 100 and 0 <= y1 < y2 <= 100):
+            raise ValueError("La guía está fuera de los límites del video.")
+        t = min(t, duracion)
+        if grupo and t <= grupo[-1][0]:
+            raise ValueError("Ordena los puntos de la guía por tiempo.")
+        grupo.append([t, x1*ancho/100, y1*alto/100, (x2-x1)*ancho/100, (y2-y1)*alto/100])
+    return [(grupo, grupo[-1][0])]
 
 
 def validar_cajas(cajas, fps, total, ancho, alto, duracion):
@@ -192,8 +230,10 @@ def editar_marca(carpeta, texto, cliente, modelo):
                       "-c:v","mjpeg","-f","image2pipe","pipe:1"],salida=True,tiempo=20)
     with Image.open(io.BytesIO(prueba)) as im:
         w,h = im.size
-    cajas,fps,total = localizar(clip,texto,cliente,modelo,info["duracion"])
-    grupos = validar_cajas(cajas,fps,total,w,h,info["duracion"])
+    grupos = trayectoria_guiada(texto, w, h, info["duracion"])
+    if grupos is None:
+        cajas, fps, total = localizar(clip, texto, cliente, modelo, info["duracion"])
+        grupos = validar_cajas(cajas, fps, total, w, h, info["duracion"])
     archivo = carpeta / "editado.mp4"
     silenciar = any(palabra in texto.lower() for palabra in ("sin audio", "quita el audio", "elimina el audio", "sin sonido"))
     sustitucion(clip, carpeta/"marca.png", archivo, grupos, (w,h), silenciar)
