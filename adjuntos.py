@@ -9,6 +9,7 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from PIL import Image, ImageOps, UnidentifiedImageError
+from pydantic import BaseModel, Field
 
 MAX_BYTES = 6 * 1024 * 1024
 TIPOS = {"image/jpeg", "image/png", "image/webp", "application/pdf", "text/plain"}
@@ -35,7 +36,9 @@ def procesar(tipo, datos, texto, cliente, modelo):
         imagen.save(salida, "PNG")
         resultado = cliente.with_options(timeout=150, max_retries=0).images.edit(
             model="gpt-image-1.5", image=("foto.png", salida.getvalue(), "image/png"),
-            prompt=texto, quality="medium", output_format="jpeg", n=1)
+            prompt=("Aplica solo los cambios pedidos. Conserva la identidad y los rasgos de cada persona de la foto "
+                    "salvo que la petición indique expresamente un cambio específico. Petición: " + texto),
+            input_fidelity="high", quality="medium", output_format="jpeg", n=1)
         if not resultado.data or not resultado.data[0].b64_json:
             raise HTTPException(502, "El editor no devolvió la foto.")
         return Response(base64.b64decode(resultado.data[0].b64_json, validate=True), media_type="image/jpeg")
@@ -62,7 +65,33 @@ def procesar(tipo, datos, texto, cliente, modelo):
     return {"respuesta": resultado.output_text}
 
 
+class PeticionDiseno(BaseModel):
+    texto: str = Field(min_length=1, max_length=4000)
+
+
 def conectar_adjuntos(app, autorizar, cliente, modelo):
+    @app.post("/chat/diseno", dependencies=[Depends(autorizar)])
+    def diseno(peticion: PeticionDiseno):
+        texto = peticion.texto.strip()
+        if not texto:
+            raise HTTPException(422, "Describe el diseño que quieres crear.")
+        if cliente is None:
+            raise HTTPException(503, "La generación de diseños no está configurada.")
+        try:
+            resultado = cliente.with_options(timeout=150, max_retries=0).images.generate(
+                model="gpt-image-1.5", quality="medium", size="auto", output_format="jpeg", n=1,
+                prompt=("Diseña la pieza gráfica publicitaria final para guardar, con texto legible en español "
+                        "salvo que se pida otro idioma. Respeta el formato, marca y texto que se proporcionen. "
+                        "No inventes fechas, precios ni promociones. Petición: " + texto))
+            if not resultado.data or not resultado.data[0].b64_json:
+                raise ValueError
+            contenido = base64.b64decode(resultado.data[0].b64_json, validate=True)
+        except Exception as exc:
+            codigo = getattr(exc, "status_code", None)
+            raise HTTPException(422 if codigo == 400 else 502, "No se pudo generar el diseño.") from None
+        return Response(contenido, media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
+
+
     @app.post("/chat/adjunto", dependencies=[Depends(autorizar)])
     async def adjunto(request: Request):
         tipo = request.headers.get("content-type", "").split(";")[0]
