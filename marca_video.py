@@ -52,13 +52,65 @@ def localizar(clip, instruccion, cliente, modelo, duracion):
     total = len(datos) // tam
     if not total:
         raise ValueError("No se pudo leer el video.")
-    cajas = []
     servicio = cliente.with_options(timeout=65, max_retries=1)
-    for primer in range(math.ceil(desde * fps), total, 12):
+    comienzo = math.ceil(desde * fps)
+    propuestas = consultar_vistas(servicio, modelo, instruccion, datos, total, fps, comienzo)
+    revisadas = consultar_vistas(servicio, modelo, instruccion, datos, total, fps, comienzo, propuestas)
+    log.info("Localización visual: %d propuestas, %d confirmadas", len(propuestas), len(revisadas))
+    return [[i, x1*.216, y1*.312, x2*.216, y2*.312]
+            for i, (x1, y1, x2, y2) in sorted(revisadas.items())], fps, total
+
+
+def vista_de_revision(imagen, caja):
+    """Ejes en milésimas del cuadro, idénticos a las coordenadas del compositor."""
+    ancho, alto = 432, 624
+    margen_x, margen_y = 32, 22
+    panel = Image.new("RGB", (ancho + margen_x + 16, alto + margen_y + 14), "#191919")
+    panel.paste(imagen.resize((ancho, alto), Image.Resampling.LANCZOS), (margen_x, margen_y))
+    pincel = ImageDraw.Draw(panel, "RGBA")
+    for marca in range(0, 1001, 100):
+        x = margen_x + round(marca * ancho / 1000)
+        y = margen_y + round(marca * alto / 1000)
+        pincel.line((x, margen_y, x, margen_y+alto), fill=(255,255,255,92))
+        pincel.line((margen_x, y, margen_x+ancho, y), fill=(255,255,255,92))
+        pincel.text((x-9, 3), str(marca), fill="white")
+        pincel.text((1, y-5), str(marca), fill="white")
+    if caja is not None:
+        x1, y1, x2, y2 = caja
+        pincel.rectangle((margen_x+x1*ancho/1000, margen_y+y1*alto/1000,
+                          margen_x+x2*ancho/1000, margen_y+y2*alto/1000),
+                         outline=(0,230,244,255), width=2)
+    return panel
+
+
+def consultar_vistas(servicio, modelo, instruccion, datos, total, fps, comienzo, propuestas=None):
+    tam = 216 * 312 * 3
+    fin_lote = 12
+    indicaciones = (
+        "Localiza la marca ORIGINAL impresa en el objeto que describe el pedido. "
+        "Cada imagen está precedida de su número de fotograma y tiempo. Devuelve el número original. "
+        "Ajusta la caja al borde del diseño visible, incluso si solo se ve de perfil. "
+        "No incluyas el cuerpo del objeto, otras marcas ni el espacio alrededor. Omite los fotogramas "
+        "en los que esa marca aún no es visible. Usa coordenadas de 0 a 1000 (x de izquierda a derecha, "
+        "y de arriba a abajo), con origen en la esquina superior izquierda de la imagen del video."
+    )
+    if propuestas is not None:
+        indicaciones += (
+            " Actúas como segundo revisor. El rectángulo cian es una hipótesis falible de otra pasada. "
+            "Mira dónde están las letras o el dibujo real y lee los números de los dos ejes. Corrige los "
+            "cuatro bordes si el rectángulo está por debajo, por encima, fuera o tiene otro tamaño. "
+            "Borra las detecciones de otras tomas. Añade las que falten, incluidas las últimas vistas "
+            "si la marca sigue a la vista. Las líneas de la cuadrícula marcan 100 unidades. "
+            "Las etiquetas de los ejes están fuera del video y no cuentan en sus coordenadas."
+        )
+    cajas = {}
+    for primer in range(comienzo, total, fin_lote):
         partes = [{"type": "text", "text": instruccion}]
-        ultimo = min(primer + 12, total)
+        ultimo = min(primer + fin_lote, total)
         for i in range(primer, ultimo):
             foto = Image.frombytes("RGB", (216, 312), datos[i*tam:(i+1)*tam])
+            if propuestas is not None:
+                foto = vista_de_revision(foto, propuestas.get(i))
             buf = io.BytesIO()
             foto.save(buf, format="JPEG", quality=90)
             url = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
@@ -66,13 +118,7 @@ def localizar(clip, instruccion, cliente, modelo, duracion):
                            {"type": "image_url", "image_url": {"url": url, "detail": "high"}}])
         respuesta = servicio.chat.completions.create(
             model=modelo, response_format=FORMATO_TRAYECTORIA, messages=[
-                {"role": "system", "content":
-                 "Eres un localizador de objetos. Cada imagen es un fotograma completo, precedido de su número. "
-                 "Encuentra la marca que ya aparece impresa en el objeto descrito en la orden. Usa el número de "
-                 "fotograma indicado. Devuelve la caja ajustada al dibujo completo visible. Coordenadas enteras "
-                 "de 0 a 1000 en ambos ejes: izquierda y derecha como fracción del ancho, arriba y abajo como "
-                 "fracción del alto. Incluye las bandas negras en el sistema de coordenadas. Un registro por "
-                 "fotograma visible. Omite los que no muestran la marca en ese objeto. Solo JSON."},
+                {"role": "system", "content": indicaciones},
                 {"role": "user", "content": partes}])
         contenido = respuesta.choices[0].message.content
         if not contenido:
@@ -85,10 +131,8 @@ def localizar(clip, instruccion, cliente, modelo, duracion):
                 continue
             i, x1, y1, x2, y2 = (fila[k] for k in CAMPOS_CAJA)
             if primer <= i < ultimo and 0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000:
-                cajas.append([i, x1*.216, y1*.312, x2*.216, y2*.312])
-    unicas = {fila[0]: fila for fila in cajas}
-    log.info("Localización visual: %d fotogramas con marca de %d", len(unicas), total)
-    return [unicas[i] for i in sorted(unicas)], fps, total
+                cajas[i] = (x1, y1, x2, y2)
+    return cajas
 
 
 def trayectoria_guiada(texto, ancho, alto, duracion):
