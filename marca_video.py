@@ -12,6 +12,28 @@ from PIL import Image, ImageDraw, ImageOps
 from estudio_medios import ejecutar, entrada_video, ffmpeg, inspeccionar
 
 
+# El servicio exige esta estructura para que pueda validar cada trayectoria
+# antes de componer el logo sobre los fotogramas originales.
+FORMATO_TRAYECTORIA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "trayectoria_marca",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "cajas": {
+                    "type": "array",
+                    "items": {"type": "array", "items": {"type": "integer"}},
+                }
+            },
+            "required": ["cajas"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
 def localizar(clip, instruccion, cliente, modelo, duracion):
     # Muestrear el giro de objetos pequeños sin enviar más de sesenta vistas.
     fps = min(4, 60 / duracion)
@@ -38,7 +60,7 @@ def localizar(clip, instruccion, cliente, modelo, duracion):
         url = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
         partes.append({"type": "image_url", "image_url": {"url": url, "detail": "high"}})
     respuesta = cliente.with_options(timeout=85, max_retries=1).chat.completions.create(
-        model=modelo, response_format={"type": "json_object"}, messages=[
+        model=modelo, response_format=FORMATO_TRAYECTORIA, messages=[
             {"role": "system", "content":
              "Localiza exclusivamente la marca existente que el usuario quiere sustituir en el objeto y las tomas indicados. "
              "Cada celda contiene un fotograma de 216 por 312 píxeles, incluida su banda negra si hay encuadre, "
@@ -49,7 +71,13 @@ def localizar(clip, instruccion, cliente, modelo, duracion):
              "Si se pide el vaso del final, omite las marcas del surtidor, las otras tomas y otros vasos. "
              "Devuelve solo JSON con la lista cajas. Si no puedes identificarla, devuelve la lista vacía."},
             {"role": "user", "content": partes}])
-    cajas = json.loads(respuesta.choices[0].message.content)["cajas"]
+    contenido = respuesta.choices[0].message.content
+    if not contenido:
+        raise ValueError("El análisis visual no devolvió una trayectoria.")
+    resultado = json.loads(contenido)
+    if not isinstance(resultado, dict) or not isinstance(resultado.get("cajas"), list):
+        raise ValueError("El análisis visual devolvió una trayectoria ilegible.")
+    cajas = resultado["cajas"]
     return cajas, fps, total
 
 
