@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse
 from PIL import Image, ImageDraw
 from pydantic import BaseModel, Field
 
+from adjuntos import conectar_adjuntos
 from estudio_medios import FOTOS, VIDEOS, editar, inspeccionar, miniatura, reel_narrado
 
 AGENTES = ("Proyecto Centinela", "Nebulosa Digital", "Estrella Azul")
@@ -305,6 +306,7 @@ def conectar_estudio(app, directorio, autorizar, memoria, cliente, modelo):
     router.add_api_route("/misiones/{mid}/decision", estudio.decidir, methods=["POST"])
     router.add_api_route("/misiones/{mid}/pieza", estudio.recurso, methods=["GET"])
     app.include_router(router)
+    conectar_adjuntos(app, autorizar, cliente, modelo)
     app.router.add_event_handler("startup", estudio.iniciar)
     app.router.add_event_handler("shutdown", estudio.parar.set)
     return estudio
