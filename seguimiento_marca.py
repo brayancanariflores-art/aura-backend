@@ -137,25 +137,70 @@ def escoger_marca(servicio, modelo, texto, foto, candidatos):
     return tono,caja,seleccion.get("extension","ambos")
 
 
+def recuperar_letras(frames,tono,pista):
+    """Reunir letras separadas que pudieron quedar fuera de la ventana del fotograma anterior."""
+    ids=sorted(pista)
+    arr=np.stack([pista[i] for i in ids])
+    w0,h0=np.percentile(arr[:,2:]-arr[:,:2],90,axis=0)
+    resultado={}
+    for j,i in enumerate(ids):
+        izq,y,der,b=arr[j]
+        w,h=der-izq,b-y
+        # Una palabra puede tener varios grupos de tinta aunque comparta una sola etiqueta.
+        x1,y1=np.maximum(0,np.floor([izq-.65*w0,y-.08*h0])).astype(int)
+        x2,y2=np.minimum([frames.shape[2],frames.shape[1]],np.ceil([der+.65*w0,b+.08*h0])).astype(int)
+        mask=tinta(canales(frames[i,y1:y2,x1:x2]),tono)
+        conteo=mask.sum(axis=0)
+        suave=ndimage.uniform_filter1d(conteo.astype(float),3)
+        cols=np.flatnonzero(suave>=max(2.6,.20*suave.max()))
+        if cols.size:
+            hueco=max(5, min(w0*.255,max(w*.38,w0*.18)))
+            grupos=np.split(cols,np.flatnonzero(np.diff(cols)>hueco)+1)
+            def puntuacion(c):
+                comun=max(0,min(c[-1]+1,der-x1)-max(c[0],izq-x1))
+                return suave[c].sum()*min(1,comun/max(2,.30*w))
+            cs=max(grupos,key=puntuacion)
+            if puntuacion(cs)>0:
+                izq,der=x1+cs[0], x1+cs[-1]+1
+        resultado[i]=np.array([izq,y,der,b],float)
+    return resultado
+
+
 def trayectoria_adaptada(items, lado, fps, tam, formato, duracion):
     indices=sorted(items)
     cajas=np.array([items[i] for i in indices])
     cajas=ndimage.median_filter(cajas,size=(3,1),mode="nearest")
+    # Suavizar los cambios de luz sin borrar el momento en que entra el dibujo.
+    cajas=ndimage.gaussian_filter1d(cajas, .8, axis=0, mode="nearest")
     anchos=cajas[:,2]-cajas[:,0]
     ancho_frontal=max(1,np.percentile(anchos,85))
     alto,ancho=formato
     escala_x,escala_y=tam[0]/ancho,tam[1]/alto
+    limite=max(1,min(len(cajas)-1,int(np.argmax(anchos >= .7*ancho_frontal))))
+    giro=None
+    if anchos[0] < ancho_frontal*.55 and limite>0:
+        giro="izquierda" if abs(cajas[limite,0]-cajas[0,0])>abs(cajas[limite,2]-cajas[0,2]) else "derecha"
     camino=[]
     for i,(x,y,r,b) in zip(indices,cajas):
         w,h=r-x,b-y
-        extra=min(w*.72,w*.16+ancho_frontal*.11)
-        menor=w*(.035+.115*min(1,w/ancho_frontal))
-        izq,der=(menor,extra) if lado=="derecha" else (extra,menor)
-        if lado=="ambos" and w>.70*ancho_frontal:
-            izq,der=w*.22,w*.17
+        ratio=min(1,w/ancho_frontal)
+        apertura=min(1,max(0,(ratio-.38)/.42))
+        frontal=max(w*.18,min(h*.21,ancho_frontal*.18))
+        menor=w*(.025+.15*apertura)
+        extra=min(w*(1.26-.30*apertura),max(frontal,ancho_frontal*(.44-.21*apertura)))
+        direccion=giro if giro and ratio<.78 else lado
+        izq,der=(menor,extra) if direccion=="derecha" else (extra,menor)
+        if direccion=="ambos" and ratio>=.78:
+            izq,der=frontal*1.13,frontal
         x1,x2=max(0,x-izq),min(ancho,r+der)
-        y1,y2=max(0,y-h*.08),min(alto,b+h*.08)
+        # El trazo blanco o negro que rodea la tinta conserva la altura al verse de perfil.
+        y1=max(0,y-h*(.115-.035*apertura))
+        y2=min(alto,b+h*(.225-.105*apertura))
         camino.append([i/fps,x1*escala_x,y1*escala_y,(x2-x1)*escala_x,(y2-y1)*escala_y])
+    if giro and indices[0]>0 and anchos[0]<.35*ancho_frontal:
+        tiempo,x,y,w,h=camino[0]
+        borde=x+w if giro=="izquierda" else x
+        camino.insert(0,[tiempo-1/fps,min(tam[0]-1,borde),y+h*.31,1,max(1,h*.38)])
     return [(camino,min(duracion,(indices[-1]+1)/fps))]
 
 
@@ -198,6 +243,7 @@ def buscar_al_final(clip, texto, cliente, modelo, duracion, tam):
             if hallada is None: continue
             tono,caja,lado=hallada
             pista=seguir(frames,i,tono,caja)
+            pista=recuperar_letras(frames,tono,pista)
             if len(pista)>=max(4,fps//2) and comprobar_objeto(servicio,modelo,texto,frames,pista):
                 return trayectoria_adaptada(pista,lado,fps,tam,(h,w),duracion)
     return None

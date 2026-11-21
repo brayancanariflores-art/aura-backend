@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from seguimiento_marca import anclas, canales, seguir, trayectoria_adaptada
+from seguimiento_marca import anclas, canales, recuperar_letras, seguir, trayectoria_adaptada
 
 
 class SeguimientoMarcaTest(unittest.TestCase):
@@ -26,6 +26,18 @@ class SeguimientoMarcaTest(unittest.TestCase):
                                                   (120,136), 25/15)[0]
                 self.assertAlmostEqual(grupo[0][0],5/15)
                 self.assertAlmostEqual(fin,25/15)
+
+    def test_recupera_las_dos_partes_del_dibujo(self):
+        frames = np.full((18,100,140,3),100,dtype=np.uint8)
+        pista = {}
+        for i,frame in enumerate(frames):
+            for inicio in (32,58):
+                for dx in range(0,18,5):
+                    frame[35:58,inicio+dx:inicio+dx+3] = [210,23,26]
+            pista[i] = np.array([58 if 7<=i<=11 else 32,35,76,58],float)
+        medidas = recuperar_letras(frames,0,pista)
+        self.assertLess(medidas[9][0],36)
+        self.assertGreater(medidas[9][2],70)
 
     def test_fondo_neutro_sin_marca(self):
         im = np.full((120,180,3), 100, dtype=np.uint8)
