@@ -11,6 +11,8 @@ from fastapi.responses import Response
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, Field
 
+from reels_chat import conectar_reels
+
 MAX_BYTES = 6 * 1024 * 1024
 TIPOS = {"image/jpeg", "image/png", "image/webp", "application/pdf", "text/plain"}
 
@@ -70,6 +72,8 @@ class PeticionDiseno(BaseModel):
 
 
 def conectar_adjuntos(app, autorizar, cliente, modelo):
+    conectar_reels(app, autorizar, cliente, modelo)
+
     @app.post("/chat/diseno", dependencies=[Depends(autorizar)])
     def diseno(peticion: PeticionDiseno):
         texto = peticion.texto.strip()
