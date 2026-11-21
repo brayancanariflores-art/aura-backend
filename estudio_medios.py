@@ -2,6 +2,8 @@
 import io
 import html
 import math
+import unicodedata
+from importlib.resources import files
 import re
 import subprocess
 
@@ -82,10 +84,11 @@ def rotulo(medidas, texto):
     try:
         fuente = ImageFont.truetype("DejaVuSans-Bold.ttf", max(25, min(w, h) // 20))
     except OSError:
-        fuente = ImageFont.load_default(size=max(25, min(w, h) // 20))
+        ruta_fuente = files("reportlab").joinpath("fonts", "VeraBd.ttf")
+        fuente = ImageFont.truetype(str(ruta_fuente), max(25, min(w, h) // 20))
     lineas = []
     actual = ""
-    for palabra in texto.split():
+    for palabra in unicodedata.normalize("NFC", texto).split():
         posible = (actual + " " + palabra).strip()
         if pincel.textlength(posible, font=fuente) > w * .79 and actual:
             lineas.append(actual)
@@ -143,30 +146,38 @@ def tiempo_srt(segundos):
 
 
 def reel_narrado(ruta, carpeta, info, plan, formato, frases, narrar, *, escenas=None, medidas=None,
-                 subtitulos=None, idioma_voz="und", idioma_subtitulos=None):
+                 subtitulos=None, idioma_voz="und", idioma_subtitulos=None, audio_original=None):
     """Cada subtítulo dura exactamente lo que dura su fragmento de narración PCM."""
     import wave
     medidas = medidas or MEDIDAS[formato]
     w, h = medidas
-    with wave.open(str(carpeta / "voz.wav"), "wb") as voz:
-        voz.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
-        inicio = 0.
-        marcas = []
-        for i, frase in enumerate(frases):
-            audio = narrar(frase)
-            fin = inicio + len(audio) / 48000
-            if not audio or len(audio) % 2 or fin > 60:
-                raise ValueError("La narración no cabe en un reel de un minuto.")
-            voz.writeframes(audio)
-            capa = rotulo(medidas, frase) if subtitulos is None else Image.new("RGBA", medidas)
-            if plan.get("marca") and i == len(frases) - 1:
-                capa.alpha_composite(rotulo(medidas, plan["marca"]))
-            if not plan.get("credito_en_chat"):
-                ImageDraw.Draw(capa).text((w * .08, h * .08), "Voz generada por IA", fill="white",
-                                          stroke_width=2, stroke_fill="#202030", font=ImageFont.load_default(size=20))
-            capa.save(carpeta / f"sub-{i}.png")
-            marcas.append((inicio, fin))
-            inicio = fin
+    marcas = []
+    inicio = 0.
+    if audio_original is not None:
+        pista, duracion = audio_original
+        marcas = [(duracion * i / len(frases), duracion * (i + 1) / len(frases))
+                  for i in range(len(frases))]
+        inicio = duracion
+    else:
+        pista = carpeta / "voz.wav"
+        with wave.open(str(pista), "wb") as voz:
+            voz.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+            for frase in frases:
+                audio = narrar(frase)
+                fin = inicio + len(audio) / 48000
+                if not audio or len(audio) % 2 or fin > 60:
+                    raise ValueError("La narración no cabe en un reel de un minuto.")
+                voz.writeframes(audio)
+                marcas.append((inicio, fin))
+                inicio = fin
+    for i, frase in enumerate(frases):
+        capa = rotulo(medidas, frase) if subtitulos is None else Image.new("RGBA", medidas)
+        if plan.get("marca") and i == len(frases) - 1:
+            capa.alpha_composite(rotulo(medidas, plan["marca"]))
+        if not plan.get("credito_en_chat"):
+            ImageDraw.Draw(capa).text((w * .08, h * .08), "Voz generada por IA", fill="white",
+                                      stroke_width=2, stroke_fill="#202030", font=ImageFont.load_default(size=20))
+        capa.save(carpeta / f"sub-{i}.png")
     entradas = []
     if escenas:
         if len(escenas) != len(marcas):
@@ -195,7 +206,7 @@ def reel_narrado(ruta, carpeta, info, plan, formato, frases, narrar, *, escenas=
         filtros = [f"[0:v:0]fps=24,scale={w}:{h}:force_original_aspect_ratio=decrease,"
                    f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=0x121725,setsar=1[v0]"]
         audio_idx = 1
-    entradas += ["-i", str(carpeta / "voz.wav")]
+    entradas += ["-i", str(pista)]
     for i, (desde, hasta) in enumerate(marcas):
         entradas += ["-i", str(carpeta / f"sub-{i}.png")]
         filtros.append(f"[v{i}][{i+audio_idx+1}:v]overlay=0:0:enable='gte(t,{desde})*lt(t,{hasta})'[v{i+1}]")
@@ -212,11 +223,13 @@ def reel_narrado(ruta, carpeta, info, plan, formato, frases, narrar, *, escenas=
         entradas += ["-f", "srt", "-i", str(archivo_srt)]
         opciones_subtitulos = ["-map", f"{audio_idx + len(marcas) + 1}:s:0", "-c:s", "mov_text",
                                "-metadata:s:s:0", f"language={idioma_subtitulos}", "-disposition:s:0", "default"]
+    opciones_audio = ["-c:a", "copy"] if audio_original else ["-c:a", "aac", "-b:a", "96k", "-metadata:s:a:0", f"language={idioma_voz}"]
+    limite = [] if audio_original and escenas else ["-t", str(inicio)]
     destino = carpeta / "pieza.mp4"
     ejecutar(["-v", "error", "-y", *entradas, "-filter_complex", ";".join(filtros),
-              "-map", f"[v{len(marcas)}]", "-map", f"{audio_idx}:a:0", "-t", str(inicio), "-threads", "2",
+              "-map", f"[v{len(marcas)}]", "-map", f"{audio_idx}:a:0", *limite, "-threads", "2",
               "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-maxrate", "2000k", "-bufsize", "4000k",
-              "-c:a", "aac", "-b:a", "96k", "-pix_fmt", "yuv420p", "-map_metadata", "-1",
-              "-metadata:s:a:0", f"language={idioma_voz}", *opciones_subtitulos,
+              "-pix_fmt", "yuv420p", "-map_metadata", "-1", *opciones_audio, *opciones_subtitulos,
               "-movflags", "+faststart", str(destino)], tiempo=120)
-    return destino, f"Reel de {inicio:.1f} s con voz sintética y {len(marcas) if subtitulos is None else len(subtitulos)} subtítulos."
+    tipo_audio = "audio original" if audio_original else "voz sintética"
+    return destino, f"Reel de {inicio:.1f} s con {tipo_audio} y {len(marcas) if subtitulos is None else len(subtitulos)} subtítulos."
