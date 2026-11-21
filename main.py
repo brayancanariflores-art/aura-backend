@@ -17,6 +17,9 @@ import urllib.parse
 import urllib.request
 from html import unescape
 
+from contexto_local import (ContextoDispositivo, contexto_del_turno, es_consulta_electoral,
+                            referencia_local, respuesta_local)
+
 import chromadb
 import uvicorn
 from fastapi import FastAPI, HTTPException, Depends
@@ -901,7 +904,7 @@ def buscar_en_base_vectorial(pregunta_usuario):
         return ""
 
 
-def web_search(query):
+def web_search(query, contexto=None):
     """Búsqueda web con fuentes trazables; no inventar citas ni URLs."""
     if not isinstance(query, str) or not query.strip():
         return "No se proporcionó una consulta válida."
@@ -913,7 +916,11 @@ def web_search(query):
             tools=[{"type": "web_search_preview"}],
             tool_choice={"type": "web_search_preview"},
             input=(
-                "Fecha actual UTC: " + datetime.now(timezone.utc).strftime("%Y-%m-%d") + ". "
+                referencia_local(contexto or contexto_del_turno(None)) + " "
+                "Para elecciones comprueba la fecha de la votación y la jurisdicción, prioriza "
+                "fuentes electorales oficiales, distingue proyecciones y resultados certificados. "
+                "Aclara qué elección se consulta si hay varias interpretaciones plausibles. "
+                "No presentes resultados históricos como recientes. "
                 "Busca en la web para responder a la consulta. Usa solo hechos apoyados por fuentes "
                 "encontradas. Para noticias indica la fecha de publicación real y enlaza el artículo "
                 "específico, no una portada. No atribuyas fechas o títulos sin confirmación. "
@@ -2284,6 +2291,7 @@ def comando_tareas(pregunta):
 
 class PeticionChat(BaseModel):
     texto: str = Field(min_length=1, max_length=10000)
+    contexto: ContextoDispositivo | None = None
 
 
 
@@ -3806,6 +3814,10 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
     pregunta = peticion.texto.strip()
     if not pregunta:
         raise HTTPException(status_code=422, detail="El campo texto no puede estar vacio")
+    contexto = contexto_del_turno(peticion.contexto)
+    local = respuesta_local(normalizar_recuerdo(pregunta), contexto)
+    if local:
+        return {"respuesta": local}
     # 3.14.15: la prohibicion explicita de escritura en una consulta hipotetica
     # prevalece sobre cualquier verbo de registro mencionado como ejemplo.
     # No consultar ni modificar SQLite; no activar memoria automatica.
@@ -3898,8 +3910,8 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
             r"fuentes?|navega|web|publicad[oa]s?|últimos días)\b",
             pregunta, re.IGNORECASE
         ))
-        if requiere_web:
-            respuesta_web = web_search(pregunta)
+        if requiere_web or es_consulta_electoral(normal_pregunta):
+            respuesta_web = web_search(pregunta, contexto)
             guardar_en_historial("user", pregunta)
             guardar_en_historial("assistant", respuesta_web)
             return {"respuesta": respuesta_web}
@@ -3983,6 +3995,7 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
                 messages.append({"role": "system", "content":
                                  "La consulta de SQLite no encontró tareas registradas para " +
                                  proyecto_tareas + ". No inventes tareas."})
+        messages.append({"role": "user", "content": referencia_local(contexto)})
         messages.append({"role": "user", "content": pregunta})
 
         response = ai_client.chat.completions.create(
@@ -3997,7 +4010,7 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
                 if tool_call.function.name == "web_search":
                     try:
                         args = json.loads(tool_call.function.arguments)
-                        result = web_search(args.get("query", ""))
+                        result = web_search(args.get("query", ""), contexto)
                     except (json.JSONDecodeError, TypeError, AttributeError):
                         result = "Argumentos de busqueda no validos."
                 else:
