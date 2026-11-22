@@ -451,7 +451,20 @@ def imprimir(fotograma, caja, arte, vista, curva, estado=None, escala=1., posici
                                      order=1,mode="reflect")
         luz=np.mean(fondo,axis=2,keepdims=True)
         tinte=np.clip((fondo+.12)/(luz+.12),.45,1.7)
-        fondo=np.clip(fondo+.53*grano[:,:,None]*tinte,0,1)
+        # El relleno ya contiene detalle del fotograma. Medir cuánto admite el
+        # vidrio expuesto para que la segunda muestra no duplique ese contraste.
+        observado = np.mean(foto, axis=2, dtype=np.float32)/255
+        libres = (muestras>.65) & (limite>.8) & ~ndimage.maximum_filter(excluir, size=7)
+        if np.count_nonzero(libres) >= 32:
+            residual = observado-ndimage.gaussian_filter(observado,1.75)
+            real = float(np.percentile(np.abs(residual[libres]),70))
+            examinar = opacidad>.5
+            if np.any(examinar):
+                local = luz[:,:,0]-ndimage.gaussian_filter(luz[:,:,0],1.75)
+                actual = float(np.percentile(np.abs(local[examinar]),70))
+                disponible = max(0.,real-actual)
+                amplitud = np.clip(grano,-2*disponible,2*disponible)
+                fondo=np.clip(fondo+.45*amplitud[:,:,None]*tinte,0,1)
     original_rgb = foto.astype(np.float32)/255
     base = original_rgb*(1-opacidad[:,:,None])+fondo*opacidad[:,:,None]
     # Escalar únicamente la textura en coordenadas del material, una vez

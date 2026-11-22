@@ -1,6 +1,9 @@
 """Registro de una impresión con los detalles del video en coordenadas del recipiente."""
+import hashlib
+import json
 import math
 import tempfile
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -340,6 +343,52 @@ def preparar_registros(clip, grupos, region):
             cajas[:,:2]-=[x,y]
             registros.append(registrar(frames[idx[0]:idx[-1]+1],ts,cajas,(sw/w,sh/h)))
         return registros
+
+
+ARCHIVO_REGISTRO = "registro-superficie.npz"
+
+
+def registros_del_clip(clip, grupos, region):
+    """Reutilizar las mediciones del original al cambiar únicamente la impresión."""
+    firma = hashlib.sha256(json.dumps([1, grupos, region], separators=(",", ":")).encode())
+    with clip.open("rb") as fuente:
+        for bloque in iter(lambda: fuente.read(1024 * 1024), b""):
+            firma.update(bloque)
+    clave = firma.hexdigest()
+    cache = clip.parent / ARCHIVO_REGISTRO
+    if cache.is_file():
+        try:
+            with np.load(cache, allow_pickle=False) as datos:
+                if datos["clave"].item() == clave:
+                    registros = []
+                    for i in range(len(grupos)):
+                        if not datos["presentes"][i]:
+                            registros.append(None)
+                            continue
+                        mascara = datos[f"mascara{i}"]
+                        registros.append(Registro(datos[f"tiempos{i}"], datos[f"estados{i}"],
+                                                  datos[f"rectangulo{i}"], mascara if mascara.size else None))
+                    return registros
+        except (OSError, ValueError, EOFError, IndexError, KeyError, zipfile.BadZipFile):
+            pass
+    registros = preparar_registros(clip, grupos, region)
+    campos = {"clave": clave, "presentes": [r is not None for r in registros]}
+    for i, registro in enumerate(registros):
+        if registro is None:
+            continue
+        campos[f"tiempos{i}"] = registro.tiempos
+        campos[f"estados{i}"] = registro.estados
+        campos[f"rectangulo{i}"] = registro.rectangulo
+        campos[f"mascara{i}"] = registro.mascara if registro.mascara is not None else np.empty(0, np.float32)
+    # Reemplazo atómico: el registro heredado de la revisión anterior es inmutable.
+    try:
+        with tempfile.TemporaryDirectory(dir=clip.parent) as temporal:
+            nuevo = Path(temporal) / ARCHIVO_REGISTRO
+            np.savez_compressed(nuevo, **campos)
+            nuevo.replace(cache)
+    except OSError:
+        pass  # La caché es opcional; las mediciones siguen en memoria para este render.
+    return registros
 
 
 def proyectar(estado, x, y, proporcion):
