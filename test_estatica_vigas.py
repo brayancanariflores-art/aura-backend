@@ -1,5 +1,5 @@
 import unittest
-from estatica_vigas import CargaDistribuida, CargaPuntual, ParAplicado, Viga, resolver_viga
+from estatica_vigas import CargaDistribuida, CargaPuntual, ParAplicado, Viga, desarrollar_viga, resolver_viga
 
 
 def viga(tramos, a, b, c, distribuidas=(), puntuales=(), pares=()):
@@ -27,6 +27,13 @@ class Equilibrio(unittest.TestCase):
     def test_corte_en_intermedio_de_una_carga_triangular(self):
         datos = viga([1.5,1.5,3], 0,3,1, [(0,2,0,6),(2,3,6,0)])
         self.assertIn("V = 6,75 kN, M = 12,375 kN·m", resolver_viga(datos))
+
+    def test_conserva_fracciones_y_aproxima_debajo(self):
+        datos = viga([1,1,1], 0,3,1, puntuales=[(2,1)])
+        solucion = desarrollar_viga(datos)
+        self.assertIn(r"\frac{1}{3}", solucion.exacto)
+        self.assertIn(r"\approx 0{,}333333", solucion.aproximacion)
+        self.assertTrue(all(paso.explicacion and paso.formula for paso in solucion.pasos))
 
     def test_se_requiere_cara_si_hay_carga_en_el_corte(self):
         with self.assertRaises(ValueError):

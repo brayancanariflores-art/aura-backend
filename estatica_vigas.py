@@ -1,5 +1,7 @@
 """Equilibrio de vigas horizontales isostáticas con dos apoyos y cargas verticales."""
-from math import isclose, isfinite
+from fractions import Fraction
+from math import isfinite
+from soluciones import Desarrollo, Paso
 from pydantic import BaseModel, Field
 
 
@@ -41,12 +43,18 @@ def resultante_lineal(x0, x1, w0, w1, limite):
     return fuerza, momento
 
 
-def resolver_viga(viga):
-    x = [0.0]
+def medida(valor):
+    if not isfinite(valor):
+        raise ValueError("medida no finita")
+    return Fraction(str(valor))
+
+
+def desarrollar_viga(viga):
+    x = [Fraction(0)]
     for tramo in viga.tramos_m:
         if not isfinite(tramo) or tramo <= 0:
             raise ValueError("cotas")
-        x.append(x[-1] + tramo)
+        x.append(x[-1] + medida(tramo))
     def posicion(indice):
         if not 0 <= indice < len(x):
             raise ValueError("posición")
@@ -55,8 +63,8 @@ def resolver_viga(viga):
     if not a < b or not 0 < c < x[-1] or c in (a, b):
         raise ValueError("posición de apoyos o corte")
 
-    fuerzas = [(posicion(p.nodo), p.fuerza_kN_hacia_abajo) for p in viga.puntuales]
-    pares = [(posicion(p.nodo), p.momento_kNm_antihorario) for p in viga.pares]
+    fuerzas = [(posicion(p.nodo), medida(p.fuerza_kN_hacia_abajo)) for p in viga.puntuales]
+    pares = [(posicion(p.nodo), medida(p.momento_kNm_antihorario)) for p in viga.pares]
     if any(pos == c for pos, _ in fuerzas + pares):
         raise ValueError("lado del corte en la discontinuidad")
     tramos = []
@@ -64,7 +72,7 @@ def resolver_viga(viga):
         inicio, fin = posicion(q.desde_nodo), posicion(q.hasta_nodo)
         if inicio >= fin:
             raise ValueError("tramo de carga")
-        tramos.append((inicio, fin, q.intensidad_inicial_kN_m_hacia_abajo, q.intensidad_final_kN_m_hacia_abajo))
+        tramos.append((inicio, fin, medida(q.intensidad_inicial_kN_m_hacia_abajo), medida(q.intensidad_final_kN_m_hacia_abajo)))
 
     def cargas(limite):
         fuerza = sum(p for pos, p in fuerzas if pos <= limite)
@@ -84,18 +92,50 @@ def resolver_viga(viga):
     flector = sum((c-pos)*r for pos, r in reacciones if pos < c) - (c*fc-mc) - pc
     derecha_v = (f-fc) - sum(r for pos, r in reacciones if pos > c)
     derecha_m = sum((pos-c)*r for pos, r in reacciones if pos > c) - ((m-mc)-c*(f-fc)) + par-pc
-    if not (isclose(cortante, derecha_v, abs_tol=1e-8) and isclose(flector, derecha_m, abs_tol=1e-8)):
+    if cortante != derecha_v or flector != derecha_m:
         raise ValueError("equilibrio")
     if not viga.cortante_positivo_hacia_abajo:
         cortante = -cortante
     if not viga.momento_positivo_antihorario:
         flector = -flector
-    def n(valor):
-        return format(0 if abs(valor) < 1e-9 else valor, ".8g").replace(".", ",")
+    def numero(valor, tex=False):
+        valor = Fraction(valor)
+        # Un decimal corto puede escribirse exactamente; en los demás casos conservamos la fracción.
+        for decimales in range(7):
+            escala = 10**decimales
+            if escala % valor.denominator == 0:
+                entero, resto = divmod(abs(valor.numerator) * escala // valor.denominator, escala)
+                signo = "-" if valor < 0 else ""
+                coma = "{,}" if tex else ","
+                return signo + str(entero) + (f"{coma}{resto:0{decimales}d}" if decimales else "")
+        if tex:
+            signo = "-" if valor < 0 else ""
+            return rf"{signo}\frac{{{abs(valor.numerator)}}}{{{valor.denominator}}}"
+        return str(valor)
+
+    def t(valor):
+        return numero(valor, tex=True)
+
     sentido_v = "abajo" if viga.cortante_positivo_hacia_abajo else "arriba"
     sentido_m = "antihorario" if viga.momento_positivo_antihorario else "horario"
-    return (f"Respuesta en C: N = 0 kN, V = {n(cortante)} kN, M = {n(flector)} kN·m.\n"
-            f"Distancias desde el extremo izquierdo: A = {n(a)} m, B = {n(b)} m, C = {n(c)} m.\n"
-            f"Reacciones verticales: A = {n(ra)} kN, B = {n(rb)} kN (positivo hacia arriba). "
-            f"Carga vertical total = {n(f)} kN; hasta C = {n(fc)} kN.\n"
-            f"Convención en la cara del tramo izquierdo: V positivo hacia {sentido_v}, M positivo {sentido_m}.")
+    exacto = rf"N_C=0\,\mathrm{{kN}},\quad V_C={t(cortante)}\,\mathrm{{kN}},\quad M_C={t(flector)}\,\mathrm{{kN{{\cdot}}m}}"
+    lectura = f"Respuesta en C: N = 0 kN, V = {numero(cortante)} kN, M = {numero(flector)} kN·m."
+    decimales = []
+    for simbolo, valor, unidad in (("V_C", cortante, "kN"), ("M_C", flector, r"kN{\cdot}m")):
+        if "/" in numero(valor):
+            decimal = format(float(valor), ".6g").replace(".", "{,}")
+            decimales.append(rf"{simbolo}\approx {decimal}\,\mathrm{{{unidad}}}")
+    nota = f"En la cara izquierda, V positivo apunta hacia {sentido_v} y M positivo es {sentido_m}."
+    pasos = [
+        Paso(explicacion="Ubicamos los apoyos y el corte desde el extremo izquierdo.",
+             formula=rf"x_A={t(a)}\,\mathrm{{m}},\quad x_B={t(b)}\,\mathrm{{m}},\quad x_C={t(c)}\,\mathrm{{m}}"),
+        Paso(explicacion="Sumamos las cargas y tomamos momentos en A para hallar las reacciones.",
+             formula=rf"W={t(f)}\,\mathrm{{kN}},\quad R_B=\frac{{{t(m-a*f-par)}}}{{{t(b-a)}}}={t(rb)}\,\mathrm{{kN}},\quad R_A=W-R_B={t(ra)}\,\mathrm{{kN}}"),
+        Paso(explicacion="Cortamos en C y equilibramos las fuerzas y los momentos del tramo izquierdo.",
+             formula=rf"W_{{\mathrm{{izq}}}}={t(fc)}\,\mathrm{{kN}},\quad \sum F_x=0,\quad \sum F_y=0,\quad \sum M_C=0")
+    ]
+    return Desarrollo(pasos=pasos, exacto=exacto, aproximacion=r",\quad ".join(decimales), nota=nota, lectura=lectura)
+
+
+def resolver_viga(viga):
+    return desarrollar_viga(viga).lectura
