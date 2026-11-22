@@ -227,15 +227,17 @@ def reconstruir(foto, mascara, alto, afinidad, limite):
     ys = np.arange(a.shape[0])
     filas = np.where(mascara.any(axis=1))[0]
     referencia = filas[-1] if len(filas) else a.shape[0]//2
-    origen = np.clip(referencia+3+.60*abs(referencia-ys),0,a.shape[0]-1).astype(int)
+    espacio = max(0, a.shape[0]-referencia-3)
+    distancia = np.clip((referencia-ys)/max(1, alto),0,1)
+    origen = np.clip(referencia+2+distancia*min(espacio,alto*.70),0,a.shape[0]-1).astype(int)
     desplazado = a[origen]
-    grano = desplazado-ndimage.gaussian_filter(desplazado,(2,2,0))
+    grano = (desplazado-ndimage.gaussian_filter(desplazado,(2.6,2.6,0)))*min(1,espacio/12)
     return np.clip(fondo+.52*np.clip(grano, -.08, .08), 0, 1)
 
 
-def imprimir(fotograma, caja, arte, vista, curva):
+def imprimir(fotograma, caja, arte, vista, curva, estado=None):
     x, y, w, h = caja
-    margen = max(6, round(max(w,h)*.34))
+    margen = max(6, round(max(w,h)*(.44 if estado is not None else .34)))
     region = (max(0,x-margen), max(0,y-margen), min(fotograma.width,x+w+margen), min(fotograma.height,y+h+margen))
     recorte = fotograma.crop(region)
     original = recorte.size
@@ -247,7 +249,23 @@ def imprimir(fotograma, caja, arte, vista, curva):
     alto = h*fy
     foto = np.asarray(recorte)
     afinidad, limite = analizar_soporte(foto,u,v,curva,vista[1])
-    mascara = extension_tinta(foto, u, v, alto, afinidad, limite)
+    anterior = None
+    px, py, normal = coordenadas_arte(u, v, w/h, vista, curva, arte.shape[1]/arte.shape[0])
+    if estado is not None:
+        from registro_superficie import proyectar
+        px, py, borde, anterior = proyectar(estado, (xx+.5)/fx+region[0], (yy+.5)/fy+region[1], arte.shape[1]/arte.shape[0])
+        # El contorno físico medido en el video distingue el fondo incluso
+        # cuando la tinta blanca o negra alcanza el borde del recipiente.
+        limite = borde
+    mascara = (extension_tinta(foto, u, v, alto, afinidad, limite)
+               if anterior is None else anterior>.35)
+    if anterior is not None:
+        # Completar los filetes claros y sus bordes suavizados justo al lado del trazo registrado.
+        cerca = ndimage.maximum_filter(mascara,size=2*max(2,round(alto*.065))+1)
+        f = foto.astype(np.float32)/255
+        claro = (f[:,:,0]>.57)&(f[:,:,1]>.57*f[:,:,0])&(f[:,:,2]>.65*f[:,:,1])
+        ribete = cerca & claro & (py>.09) & (py<1.03) & (limite>.55)
+        mascara |= ndimage.maximum_filter(ribete,size=5)
     opacidad = ndimage.gaussian_filter(mascara.astype(np.float32), max(.65, alto*.014))
     if np.any(afinidad<1):
         # Conservar el vidrio que ya se ve entre tintas y suavizar la transición
@@ -259,10 +277,11 @@ def imprimir(fotograma, caja, arte, vista, curva):
     fondo = reconstruir(foto, mascara, alto, muestras, limite)
     original_rgb = foto.astype(np.float32)/255
     base = original_rgb*(1-opacidad[:,:,None])+fondo*opacidad[:,:,None]
-    px, py, normal = coordenadas_arte(u, v, w/h, vista, curva, arte.shape[1]/arte.shape[0])
     coords = [py*(arte.shape[0]-1), px*(arte.shape[1]-1)]
     estampado = np.stack([ndimage.map_coordinates(arte[:,:,c], coords, order=1, mode="constant") for c in range(4)], 2)
     visible = (u>=0)&(u<=1)&(v>=0)&(v<=1)
+    if estado is not None:
+        visible = (px>=0)&(px<=1)&(py>=0)&(py<=1)
     densidad = .82*(.66+.34*normal)*visible*limite
     luz = np.mean(base, axis=2)
     tinta = estampado[:,:,:3]*(.73+.38*luz[:,:,None])
