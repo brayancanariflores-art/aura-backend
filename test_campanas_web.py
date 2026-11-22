@@ -11,6 +11,7 @@ from PIL import Image
 
 from ajustes_marca import AjusteNoAplicado
 from campanas_web import crear_campana, generar_toma, logo_guardado, motor_para_pedido, pide_campana, validar_movimiento
+from control_campana import contiene_accion, revisar_identidad
 from movimiento_marca import recortar_logo
 from registro_superficie import Registro, registros_del_clip
 
@@ -57,8 +58,34 @@ class CampanaWebTest(unittest.TestCase):
             with self.assertRaisesRegex(AjusteNoAplicado,"muy poco movimiento"):
                 validar_movimiento(None)
 
+    def test_paneo_y_cambio_de_luz_no_son_accion_del_sujeto(self):
+        rng = np.random.default_rng(24)
+        cuadro = rng.integers(10, 185, (80, 72), dtype=np.uint8)
+        paneo = np.roll(cuadro, 1, axis=1) + 5
+        self.assertFalse(contiene_accion(cuadro, paneo))
+        movimiento = cuadro.copy()
+        movimiento[15:60, 15:45] = np.roll(cuadro[15:60, 15:45], 3, axis=0)
+        self.assertTrue(contiene_accion(cuadro, movimiento))
+
+    def test_verifica_logo_y_rubro_al_abrir_el_mp4(self):
+        with TemporaryDirectory() as tmp:
+            ruta = Path(tmp) / "logo.png"
+            im = Image.new("RGB", (32, 32), "green")
+            im.save(ruta)
+            cliente = Mock()
+            servicio = cliente.with_options.return_value.chat.completions.create
+            respuesta = Mock()
+            respuesta.choices = [Mock()]
+            respuesta.choices[0].message.content = '{"tema_correcto":false,"logo_correcto":false}'
+            servicio.return_value = respuesta
+            with patch("control_campana.inspeccionar", return_value=({}, [im]*4)):
+                with self.assertRaisesRegex(AjusteNoAplicado, "identidad visual"):
+                    revisar_identidad(ruta, ruta, "Hatun Runa Resto Bar", cliente, "vision")
+            contenido = servicio.call_args.kwargs["messages"][1]["content"]
+            self.assertEqual(sum(item["type"]=="image_url" for item in contenido), 5)
+
     def test_contrato_motor_y_continuidad_de_revision(self):
-        with TemporaryDirectory() as tmp, patch.dict(os.environ,{"GEMINI_API_KEY":"mock"}), patch("campanas_web.httpx.post") as post, patch("campanas_web.inspeccionar",return_value=({"duracion":8,"ancho":720,"alto":1280},[])), patch("campanas_web.ejecutar") as ff:
+        with TemporaryDirectory() as tmp, patch.dict(os.environ,{"GEMINI_API_KEY":"mock"}), patch("campanas_web.httpx.post") as post, patch("campanas_web.revisar_accion") as comprobar_accion, patch("campanas_web.inspeccionar",return_value=({"duracion":8,"ancho":720,"alto":1280},[])), patch("campanas_web.ejecutar") as ff:
             p=Path(tmp)
             post.return_value.json.return_value={"id":"mock-id","steps":[{"type":"model_output","content":[{"type":"video","mime_type":"video/mp4","data":base64.b64encode(b"fixture").decode()}]}]}
             _,historia=generar_toma(p,{"escena":"Movimiento continuo"},"vertical",None,True,"anterior")
@@ -66,6 +93,7 @@ class CampanaWebTest(unittest.TestCase):
             self.assertEqual(payload["previous_interaction_id"],"anterior")
             self.assertEqual(payload["response_format"]["aspect_ratio"],"9:16")
             self.assertEqual(historia,"mock-id")
+            comprobar_accion.assert_called_once_with(p/"toma.mp4")
             self.assertNotIn("0:a:0?",ff.call_args.args[0])
 
     def test_reutiliza_medicion_y_descarta_la_de_otro_clip(self):
