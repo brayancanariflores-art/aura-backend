@@ -44,8 +44,8 @@ class EdicionAdjuntos(unittest.TestCase):
             def parse(self, **datos):
                 self.consulta = datos
                 return SimpleNamespace(output_parsed=Soluciones(ejercicios=[
-                    Solucion(ejercicio="1", calculo="2x = 6", resultado_o_dato_faltante="x = 3", comprobacion="2 × 3 = 6"),
-                    Solucion(ejercicio="2", calculo="", resultado_o_dato_faltante="Falta la longitud de la viga.", comprobacion="")]))
+                    Solucion(ejercicio="1", calculo="2x = 6", resultado_o_dato_faltante="x = 3", comprobacion="2 × 3 = 6", viga=None),
+                    Solucion(ejercicio="2", calculo="", resultado_o_dato_faltante="Falta la longitud de la viga.", comprobacion="", viga=None)]))
             def create(self, **datos):
                 return SimpleNamespace(output_text="Identifica los apoyos primero.")
         vision = Vision()

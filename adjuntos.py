@@ -15,6 +15,7 @@ from uuid import UUID
 from ediciones_chat import ejecutar_edicion, cancelar
 from reels_chat import conectar_reels
 from formato_chat import lienzo_pedido
+from estatica_vigas import Viga, resolver_viga
 
 MAX_BYTES = 6 * 1024 * 1024
 VIDEOS = {"video/mp4", "video/quicktime", "video/webm"}
@@ -34,6 +35,7 @@ GUIA_CONSULTA = (
 
 class Solucion(BaseModel):
     ejercicio: str
+    viga: Viga | None = Field(description="Si se piden N,V,M en C de una viga horizontal con articulación y rodillo, solo cargas verticales y pares, transcribe su geometría y todas sus cargas en kN y m. Usa null para otros problemas o si no puedes leer los datos.")
     calculo: str
     resultado_o_dato_faltante: str
     comprobacion: str
@@ -54,6 +56,10 @@ def consultar_adjunto(cliente, modelo, contenido, texto):
         respuesta = cliente.responses.parse(model=modelo, store=False, max_output_tokens=5600,
             instructions=GUIA_CONSULTA + " Incluye un elemento por cada ejercicio solicitado. En el campo de "
             "resultado escribe todos los valores o la solución simbólica, no instrucciones para obtenerlos. "
+            "Para una viga compatible transcribe independientemente las cotas impresas, posiciones de apoyos, "
+            "cargas y corte en viga. Usa los índices de las marcas de izquierda a derecha empezando en 0. "
+            "Un extremo libre no es un apoyo. No incluyas reacciones en las cargas externas. Cuando rellenes viga, "
+            "deja vacíos los campos cálculo, resultado y comprobación: el servidor los calcula a partir del dibujo. "
             "Una consulta anterior sirve para identificar la referencia; responde a la pregunta actual. "
             "Si un signo es ambiguo, declara la interpretación o da las alternativas. Si solo se solicitan "
             "los resultados, deja vacíos el cálculo y la comprobación.",
@@ -63,6 +69,13 @@ def consultar_adjunto(cliente, modelo, contenido, texto):
             raise HTTPException(502, "No se pudo completar la solución de los ejercicios.")
         bloques = []
         for item in solucion.ejercicios:
+            if item.viga is not None:
+                try:
+                    salida = resolver_viga(item.viga)
+                except ValueError as error:
+                    salida = f"No pude verificar el diagrama ({error}). Envía un acercamiento de ese apartado."
+                bloques.append(item.ejercicio + "\n" + salida)
+                continue
             if not item.resultado_o_dato_faltante.strip():
                 raise HTTPException(502, "Faltó el resultado de un ejercicio.")
             bloques.append("\n".join(filter(None, [item.ejercicio, "Respuesta: " + item.resultado_o_dato_faltante,
