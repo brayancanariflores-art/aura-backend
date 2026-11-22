@@ -189,8 +189,12 @@ def preparar_reel(carpeta, texto, cliente, modelo):
 
 
 def huella_medios(ruta):
-    return ejecutar(["-v","error",*entrada_video(ruta),"-map","0:v:0","-map","0:a:0?",
-                     "-c","copy","-f","streamhash","-hash","sha256","pipe:1"],salida=True)
+    # Compara las pistas con sus tiempos y subtítulos, ignorando las etiquetas del archivo.
+    return ejecutar([
+        "-v", "error", *entrada_video(ruta), "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?",
+        "-c", "copy", "-map_metadata:g", "-1", "-fflags", "+bitexact",
+        "-movflags", "empty_moov+frag_keyframe", "-f", "mp4", "md5:pipe:1",
+    ], salida=True)
 
 
 def conectar_reels(app, autorizar, cliente, modelo):
@@ -304,10 +308,11 @@ def conectar_reels(app, autorizar, cliente, modelo):
                     if marca:
                         (carpeta / "marca.png").write_bytes(marca)
                         (carpeta / "instruccion-marca").write_text(texto)
+                    if pedido.anterior:
+                        os.link(padre / "listo.mp4", carpeta / "revision-anterior.mp4")
                     if previa_marca:
                         for nombre in ("marca.png", "entrada.mp4"):
                             shutil.copyfile(padre / nombre, carpeta / nombre)
-                        os.link(padre / "listo.mp4", carpeta / "revision-anterior.mp4")
                         for opcion in ("ajuste-superficie.json", "logo-editado.png"):
                             if (padre / opcion).is_file():
                                 shutil.copyfile(padre / opcion, carpeta / opcion)
