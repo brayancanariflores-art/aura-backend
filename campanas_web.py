@@ -127,6 +127,16 @@ def validar_movimiento(ruta):
         raise AjusteNoAplicado("Detecté muy poco movimiento en el reel exportado.")
 
 
+def motor_para_pedido(texto, anterior):
+    """Una plantilla solo satisface un pedido explícito de animación del logo."""
+    orden = normalizar(texto)
+    generativo = re.search(r"\b(?:cinematografic\w*|generativ\w*|fantastic\w*|escenas? originales?|desde cero)\b", orden)
+    animacion = re.search(r"\b(?:animacion (?:de (?:la |mi )?marca|del? logo)|anima(?:r|me)? (?:el |mi |este )?logo|plantilla (?:de |del )logo)\b", orden)
+    if not generativo and (animacion or anterior.get("tipo") == "animacion"):
+        return "animacion"
+    return "generativo"
+
+
 def crear_campana(carpeta, texto, cliente, modelo, formato, avisar):
     ficha=carpeta/"campana.json"
     anterior=json.loads(ficha.read_text()) if ficha.is_file() else {}
@@ -139,7 +149,10 @@ def crear_campana(carpeta, texto, cliente, modelo, formato, avisar):
     tiene_logo=logo.is_file()
     if not tiene_logo and re.search(r"\blogo(?:tipo)?\b",normalizar(texto)):
         raise AjusteNoAplicado("Necesito el logo oficial de esa marca. Puedes adjuntarlo junto con el pedido.")
-    generativo=bool(os.environ.get("GEMINI_API_KEY")) and os.environ.get("AURA_VIDEO_GENERATIVO")=="1"
+    motor = motor_para_pedido(texto, anterior)
+    generativo = motor == "generativo"
+    if generativo and not (os.environ.get("GEMINI_API_KEY") and os.environ.get("AURA_VIDEO_GENERATIVO") == "1"):
+        raise AjusteNoAplicado("El anuncio requiere generar escenas originales. El generador de video de AURA Web todavía no está activado.")
     if not generativo and (not tiene_logo or re.search(r"\b(?:fotorrealist\w*|accion real|actores?|personajes?|dialog\w*|fantastic\w*|dragon\w*|generativ\w*)\b",normalizar(texto))):
         raise AjusteNoAplicado("Para crear esa escena hace falta activar el generador de video en AURA Web.")
     direccion=dirigir(texto,cliente,modelo,anterior.get("direccion"))
@@ -149,10 +162,9 @@ def crear_campana(carpeta, texto, cliente, modelo, formato, avisar):
     formato=formato if not anterior or re.search(r"vertical|horizontal|cuadrado|9:16|16:9",texto,re.I) else anterior["formato"]
     if generativo:
         archivo,interaccion=generar_toma(carpeta,direccion,formato,logo if tiene_logo else None,silencio,anterior.get("interaccion"))
-        motor="generativo"
     else:
         archivo=renderizar(carpeta,logo,formato,direccion,silencio=silencio,avisar=avisar)
-        interaccion,motor=None,"animacion"
+        interaccion=None
     validar_movimiento(archivo)
     ficha.write_text(json.dumps({"formato":formato,"direccion":direccion,"tipo":motor,"silencio":silencio,"interaccion":interaccion},ensure_ascii=False))
     return archivo

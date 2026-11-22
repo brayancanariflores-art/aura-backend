@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image
 
 from ajustes_marca import AjusteNoAplicado
-from campanas_web import crear_campana, generar_toma, logo_guardado, pide_campana, validar_movimiento
+from campanas_web import crear_campana, generar_toma, logo_guardado, motor_para_pedido, pide_campana, validar_movimiento
 from movimiento_marca import recortar_logo
 from registro_superficie import Registro, registros_del_clip
 
@@ -24,8 +24,22 @@ class CampanaWebTest(unittest.TestCase):
             self.assertFalse(pide_campana("video narrado de mi receta"))
             self.assertEqual(logo_guardado("Para Hatun Runa").name,"hatun-runa.png")
             self.assertIsNone(logo_guardado("Hatun Runaway"))
-            with self.assertRaisesRegex(AjusteNoAplicado,"activar"):
+            with self.assertRaisesRegex(AjusteNoAplicado,"activad"):
                 crear_campana(carpeta,"Crea un reel de Hatun Runa con personajes fantásticos",None,None,"vertical",None)
+
+    def test_una_campana_no_se_sustituye_por_la_plantilla(self):
+        orden = "Créame un reel profesional de publicidad con el logo Hatun Runa"
+        self.assertEqual(motor_para_pedido(orden, {}), "generativo")
+        self.assertEqual(motor_para_pedido("Haz una animación de marca", {}), "animacion")
+        self.assertEqual(motor_para_pedido("Usa cobre", {"tipo": "animacion"}), "animacion")
+        self.assertEqual(motor_para_pedido("Ahora crea escenas originales", {"tipo": "animacion"}), "generativo")
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=True), patch("campanas_web.renderizar") as plantilla:
+            carpeta = Path(tmp)
+            Image.new("RGBA", (24, 24), "green").save(carpeta/"logo-campana.png")
+            with self.assertRaisesRegex(AjusteNoAplicado, "generar escenas originales"):
+                crear_campana(carpeta, orden, None, None, "vertical", None)
+            plantilla.assert_not_called()
+            self.assertFalse((carpeta/"campana.mp4").exists())
 
     def test_conserva_blancos_internos_del_logo(self):
         with TemporaryDirectory() as tmp:
