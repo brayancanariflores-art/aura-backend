@@ -235,7 +235,7 @@ def reconstruir(foto, mascara, alto, afinidad, limite):
     return np.clip(fondo+.52*np.clip(grano, -.08, .08), 0, 1)
 
 
-def imprimir(fotograma, caja, arte, vista, curva, estado=None):
+def imprimir(fotograma, caja, arte, vista, curva, estado=None, escala=1.):
     x, y, w, h = caja
     margen = max(6, round(max(w,h)*(.44 if estado is not None else .34)))
     region = (max(0,x-margen), max(0,y-margen), min(fotograma.width,x+w+margen), min(fotograma.height,y+h+margen))
@@ -277,11 +277,17 @@ def imprimir(fotograma, caja, arte, vista, curva, estado=None):
     fondo = reconstruir(foto, mascara, alto, muestras, limite)
     original_rgb = foto.astype(np.float32)/255
     base = original_rgb*(1-opacidad[:,:,None])+fondo*opacidad[:,:,None]
+    # Escalar únicamente la textura en coordenadas del material, una vez
+    # reconstruida la impresión antigua. Su centro permanece fijo al girar.
+    px = .5 + (px-.5)/escala
+    py = .5 + (py-.5)/escala
     coords = [py*(arte.shape[0]-1), px*(arte.shape[1]-1)]
     estampado = np.stack([ndimage.map_coordinates(arte[:,:,c], coords, order=1, mode="constant") for c in range(4)], 2)
     visible = (u>=0)&(u<=1)&(v>=0)&(v<=1)
-    if estado is not None:
+    if estado is not None or escala != 1:
         visible = (px>=0)&(px<=1)&(py>=0)&(py<=1)
+        if curva and estado is None:
+            visible &= normal > 1e-5
     densidad = .82*(.66+.34*normal)*visible*limite
     luz = np.mean(base, axis=2)
     tinta = estampado[:,:,:3]*(.73+.38*luz[:,:,None])

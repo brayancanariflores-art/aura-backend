@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from estudio_medios import MEDIDAS, ejecutar, entrada_video, reel_narrado
 from formato_chat import lienzo_pedido
 from marca_video import editar_marca
+from tamano_marca import solo_tamano
 
 
 class PedidoReel(BaseModel):
@@ -203,7 +204,7 @@ def conectar_reels(app, autorizar, cliente, modelo):
             if completado:
                 conservar.update({"version.json", "escenas.jpg", "audio-original.m4a"})
                 if (carpeta / "marca.png").is_file():
-                    conservar.update({"marca.png", "entrada.mp4", "instruccion-marca", "pista-conservada"})
+                    conservar.update({"marca.png", "entrada.mp4", "instruccion-marca", "pista-conservada", "trayectoria-marca.json"})
             for ruta in carpeta.iterdir():
                 cache_voz = completado and re.fullmatch(r"voz-[0-9a-f]{64}\.pcm", ruta.name)
                 if ruta.name not in conservar and not cache_voz:
@@ -292,6 +293,9 @@ def conectar_reels(app, autorizar, cliente, modelo):
                     if previa_marca:
                         for nombre in ("marca.png", "entrada.mp4"):
                             shutil.copyfile(padre / nombre, carpeta / nombre)
+                        trayectoria = padre / "trayectoria-marca.json"
+                        if trayectoria.is_file() and solo_tamano(texto):
+                            shutil.copyfile(trayectoria, carpeta / trayectoria.name)
                         texto = (padre / "instruccion-marca").read_text()[:4000] + "\nAjuste solicitado: " + texto
                         (carpeta / "instruccion-marca").write_text(texto[-8000:])
                     elif pedido.anterior:
