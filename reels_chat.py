@@ -19,6 +19,7 @@ from PIL import Image
 from pydantic import BaseModel, Field
 
 from estudio_medios import MEDIDAS, ejecutar, entrada_video, reel_narrado
+from ediciones_chat import ejecutar_edicion
 from formato_chat import lienzo_pedido
 from marca_video import editar_marca
 from tamano_marca import solo_tamano
@@ -197,6 +198,33 @@ def huella_medios(ruta):
     ], salida=True)
 
 
+def renderizar_reel(carpeta, texto, cliente, modelo):
+    try:
+        archivo = preparar_reel(carpeta, texto, cliente, modelo)
+        anterior = carpeta / "revision-anterior.mp4"
+        if anterior.exists() and huella_medios(anterior) == huella_medios(archivo):
+            raise AjusteNoAplicado("La revisión produjo el mismo video y audio. El ajuste solicitado no se aplicó.")
+        archivo.replace(carpeta / "listo.mp4")
+    except AjusteNoAplicado as exc:
+        (carpeta / "aviso-edicion").touch()
+        (carpeta / "error").write_text(str(exc))
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Reel fallido (%s)", type(exc).__name__)
+        mensaje = "No pude localizar y sustituir la marca. Indica en qué momento y sobre qué objeto aparece." if (carpeta / "marca.png").is_file() else ""
+        (carpeta / "error").write_text(mensaje)
+    finally:
+        conservar = {"pedido", "listo.mp4", "error", "aviso-edicion"}
+        completado = (carpeta / "listo.mp4").is_file()
+        if completado:
+            conservar.update({"version.json", "escenas.jpg", "audio-original.m4a"})
+            if (carpeta / "marca.png").is_file():
+                conservar.update({"marca.png", "entrada.mp4", "instruccion-marca", "pista-conservada", "trayectoria-marca.json", "ajuste-superficie.json", "logo-editado.png"})
+        for ruta in carpeta.iterdir():
+            cache_voz = completado and re.fullmatch(r"voz-[0-9a-f]{64}\.pcm", ruta.name)
+            if ruta.name not in conservar and not cache_voz:
+                ruta.unlink(missing_ok=True)
+
+
 def conectar_reels(app, autorizar, cliente, modelo):
     raiz = Path(tempfile.gettempdir()) / "aura-chat-reels"
     raiz.mkdir(mode=0o700, exist_ok=True)
@@ -204,29 +232,11 @@ def conectar_reels(app, autorizar, cliente, modelo):
 
     def ejecutar_trabajo(carpeta, texto):
         try:
-            archivo = preparar_reel(carpeta, texto, cliente, modelo)
-            anterior = carpeta / "revision-anterior.mp4"
-            if anterior.exists() and huella_medios(anterior) == huella_medios(archivo):
-                raise AjusteNoAplicado("La revisión produjo el mismo video y audio. El ajuste solicitado no se aplicó.")
-            archivo.replace(carpeta / "listo.mp4")
-        except AjusteNoAplicado as exc:
-            (carpeta / "aviso-edicion").touch()
-            (carpeta / "error").write_text(str(exc))
-        except Exception as exc:
-            logging.getLogger(__name__).warning("Reel fallido (%s)", type(exc).__name__)
-            mensaje = "No pude localizar y sustituir la marca. Indica en qué momento y sobre qué objeto aparece." if (carpeta / "marca.png").is_file() else ""
-            (carpeta / "error").write_text(mensaje)
-        finally:
-            conservar = {"pedido", "listo.mp4", "error", "aviso-edicion"}
-            completado = (carpeta / "listo.mp4").is_file()
-            if completado:
-                conservar.update({"version.json", "escenas.jpg", "audio-original.m4a"})
-                if (carpeta / "marca.png").is_file():
-                    conservar.update({"marca.png", "entrada.mp4", "instruccion-marca", "pista-conservada", "trayectoria-marca.json", "ajuste-superficie.json", "logo-editado.png"})
-            for ruta in carpeta.iterdir():
-                cache_voz = completado and re.fullmatch(r"voz-[0-9a-f]{64}\.pcm", ruta.name)
-                if ruta.name not in conservar and not cache_voz:
-                    ruta.unlink(missing_ok=True)
+            ejecutar_edicion(carpeta.name, "reel", destino=str(carpeta), texto=texto, modelo=modelo)
+        except Exception:
+            # Incluso al cancelar antes del arranque, la cola debe liberar el cupo.
+            (carpeta / "error").touch()
+            (carpeta / "listo.mp4").unlink(missing_ok=True)
 
     @app.post("/chat/reel", dependencies=[Depends(autorizar)], status_code=202)
     def crear(pedido: PedidoReel, tareas: BackgroundTasks):
