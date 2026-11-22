@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from PIL import Image, ImageDraw
 
 from adjuntos import Solucion, Soluciones, procesar
+from soluciones import Desarrollo, Paso
 from ediciones_chat import cancelar, ejecutar_edicion
 
 
@@ -44,8 +45,11 @@ class EdicionAdjuntos(unittest.TestCase):
             def parse(self, **datos):
                 self.consulta = datos
                 return SimpleNamespace(output_parsed=Soluciones(ejercicios=[
-                    Solucion(ejercicio="1", calculo="2x = 6", resultado_o_dato_faltante="x = 3", comprobacion="2 × 3 = 6", viga=None),
-                    Solucion(ejercicio="2", calculo="", resultado_o_dato_faltante="Falta la longitud de la viga.", comprobacion="", viga=None)]))
+                    Solucion(ejercicio="1", viga=None, desarrollo=Desarrollo(
+                        pasos=[Paso(explicacion="Dividimos ambos lados entre dos.", formula=r"x=\frac{6}{2}")],
+                        exacto="x=3", aproximacion="", nota="", lectura="Respuesta: x = 3.")),
+                    Solucion(ejercicio="2", viga=None, desarrollo=Desarrollo(pasos=[], exacto="", aproximacion="",
+                        nota="Falta la longitud de la viga.", lectura="Falta la longitud de la viga."))]))
             def create(self, **datos):
                 return SimpleNamespace(output_text="Identifica los apoyos primero.")
         vision = Vision()
@@ -54,7 +58,11 @@ class EdicionAdjuntos(unittest.TestCase):
         solucion = procesar("image/jpeg", self.datos, "Ayúdame a resolver estos ejercicios", cliente, "test", "consultar")
         self.assertEqual(vision.consulta["input"][0]["content"][0]["detail"], "high")
         self.assertIn("Respuesta: x = 3", solucion["respuesta"])
-        self.assertIn("Respuesta: Falta la longitud", solucion["respuesta"])
+        self.assertIn("Falta la longitud", solucion["respuesta"])
+        self.assertEqual(solucion["ejercicios"][0]["pasos"][0]["formula"], r"x=\frac{6}{2}")
+        self.assertEqual(solucion["ejercicios"][1]["exacto"], "")
+        corta = procesar("image/jpeg", self.datos, "Solo el resultado del ejercicio", cliente, "test", "consultar")
+        self.assertEqual(corta["ejercicios"][0]["pasos"], [])
         pista = procesar("image/jpeg", self.datos, "Solo dame una pista para el ejercicio", cliente, "test", "consultar")
         self.assertEqual(pista["respuesta"], "Identifica los apoyos primero.")
 

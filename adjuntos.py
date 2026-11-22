@@ -16,7 +16,8 @@ from uuid import UUID
 from ediciones_chat import ejecutar_edicion, cancelar
 from reels_chat import conectar_reels
 from formato_chat import lienzo_pedido
-from estatica_vigas import Viga, resolver_viga
+from estatica_vigas import Viga, desarrollar_viga
+from soluciones import Desarrollo
 
 MAX_BYTES = 6 * 1024 * 1024
 VIDEOS = {"video/mp4", "video/quicktime", "video/webm"}
@@ -29,7 +30,7 @@ GUIA_CONSULTA = (
     "de una gráfica con el de su extremo. Haz las operaciones, comprueba los resultados y muestra la "
     "respuesta final por ejercicio, con unidades y convención de signos cuando correspondan. Si falta "
     "un dato, especifica cuál y resuelve lo que sí se pueda. Si solo pide pistas, respeta ese límite. "
-    "Escribe fórmulas legibles en texto plano, sin delimitadores LaTeX. Para fotogramas con tiempos, "
+    "Omite nombres e identificadores de los archivos adjuntos. Para fotogramas con tiempos, "
     "descríbelos en orden y distingue lo visible de lo que no se puede deducir, incluido el audio."
 )
 
@@ -37,9 +38,7 @@ GUIA_CONSULTA = (
 class Solucion(BaseModel):
     ejercicio: str
     viga: Viga | None = Field(description="Si se piden N,V,M en C de una viga horizontal con articulación y rodillo, solo cargas verticales y pares, transcribe su geometría y todas sus cargas en kN y m. Usa null para otros problemas o si no puedes leer los datos.")
-    calculo: str
-    resultado_o_dato_faltante: str
-    comprobacion: str
+    desarrollo: Desarrollo | None = Field(description="Desarrollo del ejercicio, o null si viga contiene el diagrama.")
 
 
 class Soluciones(BaseModel):
@@ -58,8 +57,13 @@ def consultar_adjunto(cliente, modelo, contenido, texto):
         opciones = {"reasoning": {"effort": "medium"}} if modelo_ejercicios.startswith("gpt-5") else {}
         lector = cliente.with_options(timeout=135, max_retries=0)
         respuesta = lector.responses.parse(model=modelo_ejercicios, store=False, max_output_tokens=10000, **opciones,
-            instructions=GUIA_CONSULTA + " Incluye un elemento por cada ejercicio solicitado. En el campo de "
-            "resultado escribe todos los valores o la solución simbólica, no instrucciones para obtenerlos. "
+            instructions=GUIA_CONSULTA + " Incluye un elemento por ejercicio. Usa su número o título del enunciado. "
+            "En desarrollo, da los pasos en orden: una frase breve sobre la operación y su fórmula o "
+            "sustitución, sin repetir la fórmula en la frase. Usa LaTeX sin delimitadores en formula, exacto "
+            "y aproximacion; en explicacion, nota y lectura usa lenguaje natural. Mantén fracciones, raíces y π "
+            "exactos y escribe debajo una aproximación decimal cuando sea informativa. No repitas el entero "
+            "ni el decimal exacto como aproximación. No inventes un valor exacto para datos aproximados. "
+            "Si falta un dato, explica cuál en nota y resuelve lo que pueda deducirse. "
             "Para una viga compatible transcribe independientemente las cotas impresas, posiciones de apoyos, "
             "cargas y corte en viga. Primero lee por separado TODAS las cotas de ese dibujo de izquierda a "
             "derecha; verifica que su suma coincide con la longitud, sin reutilizar cotas de otro ejercicio. "
@@ -67,28 +71,37 @@ def consultar_adjunto(cliente, modelo, contenido, texto):
             "marcas empiezan en 0; el extremo derecho es el índice igual al número de tramos. Cuenta cada "
             "intervalo de carga una sola vez y comprueba que sus límites y alturas coinciden con la figura. "
             "Un extremo libre no es un apoyo. No incluyas reacciones en las cargas externas. Cuando rellenes viga, "
-            "deja vacíos los campos cálculo, resultado y comprobación: el servidor los calcula a partir del dibujo. "
+            "usa desarrollo=null: el servidor calcula los valores y pasos a partir del dibujo. "
             "Una consulta anterior sirve para identificar la referencia; responde a la pregunta actual. "
             "Si un signo es ambiguo, declara la interpretación o da las alternativas. Si solo se solicitan "
-            "los resultados, deja vacíos el cálculo y la comprobación.",
+            "los resultados, omite los pasos.",
             text_format=Soluciones, input=entrada)
         solucion = respuesta.output_parsed
         if not solucion or not solucion.ejercicios:
             raise HTTPException(502, "No se pudo completar la solución de los ejercicios.")
         bloques = []
+        ejercicios = []
+        solo_resultado = re.search(r"\b(?:solo|sólo|solamente|únicamente)\s+(?:(?:dame|quiero)\s+)?(?:el |los |la |las )?(?:resultados?|respuestas?)\b|\bsin (?:pasos|procedimiento)\b", peticion, re.I)
         for item in solucion.ejercicios:
+            desarrollo = item.desarrollo
             if item.viga is not None:
                 try:
-                    salida = resolver_viga(item.viga)
+                    desarrollo = desarrollar_viga(item.viga)
                 except ValueError as error:
-                    salida = f"No pude verificar el diagrama ({error}). Envía un acercamiento de ese apartado."
-                bloques.append(item.ejercicio + "\n" + salida)
-                continue
-            if not item.resultado_o_dato_faltante.strip():
-                raise HTTPException(502, "Faltó el resultado de un ejercicio.")
-            bloques.append("\n".join(filter(None, [item.ejercicio, "Respuesta: " + item.resultado_o_dato_faltante,
-                          item.calculo, item.comprobacion])))
-        return {"respuesta": "\n\n".join(bloques)}
+                    nota = f"No pude verificar el diagrama ({error}). Envía un acercamiento de ese apartado."
+                    desarrollo = Desarrollo(pasos=[], exacto="", aproximacion="", nota=nota, lectura=nota)
+            if not desarrollo or not desarrollo.lectura.strip() or not any(
+                valor.strip() for valor in (desarrollo.exacto, desarrollo.aproximacion, desarrollo.nota)
+            ):
+                raise HTTPException(502, "Faltó el resultado o el dato necesario para completar un ejercicio.")
+            if solo_resultado:
+                desarrollo = desarrollo.model_copy(update={"pasos": []})
+            ejercicios.append({"ejercicio": item.ejercicio, **desarrollo.model_dump(exclude={"lectura"})})
+            lineas = [item.ejercicio, *(paso.explicacion for paso in desarrollo.pasos), desarrollo.lectura]
+            if desarrollo.nota and desarrollo.nota not in desarrollo.lectura:
+                lineas.append(desarrollo.nota)
+            bloques.append("\n".join(filter(None, lineas)))
+        return {"respuesta": "\n\n".join(bloques), "ejercicios": ejercicios}
     respuesta = cliente.responses.create(model=modelo, store=False, max_output_tokens=3200,
                                          instructions=GUIA_CONSULTA, input=entrada)
     if not respuesta.output_text:
