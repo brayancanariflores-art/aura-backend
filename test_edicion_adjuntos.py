@@ -50,6 +50,7 @@ class EdicionAdjuntos(unittest.TestCase):
                 return SimpleNamespace(output_text="Identifica los apoyos primero.")
         vision = Vision()
         cliente = SimpleNamespace(responses=vision)
+        cliente.with_options = lambda **opciones: cliente
         solucion = procesar("image/jpeg", self.datos, "Ayúdame a resolver estos ejercicios", cliente, "test", "consultar")
         self.assertEqual(vision.consulta["input"][0]["content"][0]["detail"], "high")
         self.assertIn("Respuesta: x = 3", solucion["respuesta"])

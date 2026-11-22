@@ -56,7 +56,8 @@ def consultar_adjunto(cliente, modelo, contenido, texto):
     if resolver and not solo_lectura:
         modelo_ejercicios = os.environ.get("AURA_MODELO_EJERCICIOS", "gpt-5.4")
         opciones = {"reasoning": {"effort": "medium"}} if modelo_ejercicios.startswith("gpt-5") else {}
-        respuesta = cliente.responses.parse(model=modelo_ejercicios, store=False, max_output_tokens=10000, **opciones,
+        lector = cliente.with_options(timeout=135, max_retries=0)
+        respuesta = lector.responses.parse(model=modelo_ejercicios, store=False, max_output_tokens=10000, **opciones,
             instructions=GUIA_CONSULTA + " Incluye un elemento por cada ejercicio solicitado. En el campo de "
             "resultado escribe todos los valores o la solución simbólica, no instrucciones para obtenerlos. "
             "Para una viga compatible transcribe independientemente las cotas impresas, posiciones de apoyos, "
