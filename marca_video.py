@@ -1,5 +1,6 @@
 """Edición localizada de una marca sobre el video fuente."""
 import base64
+from contextlib import suppress
 import io
 import json
 import math
@@ -206,20 +207,7 @@ def validar_cajas(cajas, fps, total, ancho, alto, duracion):
     return [(g, min(duracion, g[-1][0] + 1/fps)) for g in grupos]
 
 
-def sustitucion(clip, logo, archivo, grupos, tam, silenciar=False):
-    # Una capa transparente en coordenadas del original. El reloj de la pista de video
-    # original determina los fotogramas de salida, incluso para clips de tasa variable.
-    ancho, alto = tam
-    izquierdas = [p[1] for grupo, _ in grupos for p in grupo]
-    superiores = [p[2] for grupo, _ in grupos for p in grupo]
-    origen_x = max(0, math.floor(min(izquierdas))-2)
-    origen_y = max(0, math.floor(min(superiores))-2)
-    der = min(ancho, math.ceil(max(p[1]+p[3] for grupo, _ in grupos for p in grupo))+2)
-    inf = min(alto, math.ceil(max(p[2]+p[4] for grupo, _ in grupos for p in grupo))+2)
-    # Mantener dimensiones pares para el muestreo de crominancia.
-    origen_x -= origen_x % 2
-    origen_y -= origen_y % 2
-    size = (der-origen_x, inf-origen_y)
+def preparar_placa(logo):
     with Image.open(logo) as im:
         arte = ImageOps.exif_transpose(im).convert("RGBA")
         arte.thumbnail((1024,1024),Image.Resampling.LANCZOS)
@@ -240,7 +228,32 @@ def sustitucion(clip, logo, archivo, grupos, tam, silenciar=False):
     mask = Image.new("L", placa.size, 0)
     ImageDraw.Draw(mask).rounded_rectangle((0,0,placa.width-1,placa.height-1), radius=min(placa.size)*0.42, fill=255)
     placa.putalpha(mask)
-    arte = placa
+    return placa
+
+
+def sustitucion(clip, logo, archivo, grupos, tam, silenciar=False, *, impreso=False, curva=False):
+    # Una capa transparente en coordenadas del original. El reloj de la pista de video
+    # original determina los fotogramas de salida, incluso para clips de tasa variable.
+    ancho, alto = tam
+    izquierdas = [p[1] for grupo, _ in grupos for p in grupo]
+    superiores = [p[2] for grupo, _ in grupos for p in grupo]
+    margen = 2
+    if impreso:
+        margen += math.ceil(max(max(p[3:]) for g, _ in grupos for p in g)*.34)
+    origen_x = max(0, math.floor(min(izquierdas))-margen)
+    origen_y = max(0, math.floor(min(superiores))-margen)
+    der = min(ancho, math.ceil(max(p[1]+p[3] for grupo, _ in grupos for p in grupo))+margen)
+    inf = min(alto, math.ceil(max(p[2]+p[4] for grupo, _ in grupos for p in grupo))+margen)
+    # Mantener dimensiones pares para el muestreo de crominancia.
+    origen_x -= origen_x % 2
+    origen_y -= origen_y % 2
+    size = (der-origen_x, inf-origen_y)
+    if impreso:
+        from tinta_video import imprimir, preparar_tinta, vista_frontal
+        arte = preparar_tinta(logo)
+        vistas = [vista_frontal(g) for g, _ in grupos]
+    else:
+        arte = preparar_placa(logo)
     tiempos = [[p[0] for p in g] for g, _ in grupos]
     fps = 30
     inicio = math.floor(grupos[0][0][0][0]*fps)/fps
@@ -249,24 +262,45 @@ def sustitucion(clip, logo, archivo, grupos, tam, silenciar=False):
     args = [ffmpeg(), "-y", "-nostdin", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgba",
             "-s", f"{size[0]}x{size[1]}", "-r", str(fps), "-i", "pipe:0", "-threads", "1",
             "-c:v", "qtrle", str(capa)]
+    lector = None
     proc = subprocess.Popen(args, stdin=subprocess.PIPE)
     vacio = Image.new("RGBA", size)
     try:
-        for frame in range(math.ceil((final-inicio)*fps)):
+        fotogramas = math.ceil((final-inicio)*fps-1e-7)
+        if impreso:
+            primer = round(inicio*fps)
+            filtro = (f"fps={fps},crop={size[0]}:{size[1]}:{origen_x}:{origen_y}:exact=1,"
+                      f"tpad=stop_mode=clone:stop_duration=0.1,trim=start_frame={primer}:end_frame={primer+fotogramas},setpts=PTS-STARTPTS")
+            lector = subprocess.Popen([ffmpeg(), "-nostdin","-v","error","-threads","2","-filter_threads","1",
+                *entrada_video(clip),"-map","0:v:0","-an","-vf",filtro,"-threads","1","-fps_mode","passthrough","-pix_fmt","rgb24",
+                "-f","rawvideo","pipe:1"], stdout=subprocess.PIPE)
+        for frame in range(fotogramas):
             t = inicio + frame/fps
             lienzo = vacio.copy()
-            for (g, fin), ts in zip(grupos, tiempos):
+            if lector is not None:
+                datos = lector.stdout.read(size[0]*size[1]*3)
+                if len(datos) != size[0]*size[1]*3:
+                    raise ValueError("No se pudo leer la superficie del video.")
+                superficie = Image.frombytes("RGB", size, datos)
+            for indice, ((g, fin), ts) in enumerate(zip(grupos, tiempos)):
                 if not ts[0]-1e-7 <= t < fin:
                     continue
                 i = max(0, bisect_right(ts,t)-1)
                 p, q = g[i], g[min(i+1,len(g)-1)]
                 f = max(0,min(1,(t-p[0])/(q[0]-p[0]))) if q[0] > p[0] else 0
                 x,y,w,h = [round(a+f*(b-a)) for a,b in zip(p[1:],q[1:])]
-                sello = arte.resize((max(1,w),max(1,h)),Image.Resampling.LANCZOS)
-                lienzo.paste(sello,(x-origen_x,y-origen_y))
+                caja = (x-origen_x, y-origen_y, max(1,w), max(1,h))
+                if impreso:
+                    sello, posicion = imprimir(superficie, caja, arte, vistas[indice], curva)
+                else:
+                    sello = arte.resize(caja[2:], Image.Resampling.LANCZOS)
+                    posicion = caja[:2]
+                lienzo.paste(sello, posicion)
                 break
             proc.stdin.write(lienzo.tobytes())
         proc.stdin.close()
+        if lector is not None and lector.wait(timeout=25):
+            raise ValueError("Error al leer los fotogramas del video.")
         if proc.wait(timeout=40):
             raise ValueError("Error creando la capa de la marca.")
         ejecutar(["-y","-v","error",*entrada_video(clip),"-itsoffset",f"{inicio:.8f}","-i",str(capa),
@@ -277,6 +311,13 @@ def sustitucion(clip, logo, archivo, grupos, tam, silenciar=False):
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+        if lector is not None:
+            lector.stdout.close()
+            if lector.poll() is None:
+                lector.kill()
+                lector.wait()
+        with suppress(BrokenPipeError):
+            proc.stdin.close()
         capa.unlink(missing_ok=True)
 
 
@@ -300,7 +341,10 @@ def editar_marca(carpeta, texto, cliente, modelo):
         grupos = validar_cajas(cajas, fps, total, w, h, info["duracion"])
     archivo = carpeta / "editado.mp4"
     silenciar = any(palabra in texto.lower() for palabra in ("sin audio", "quita el audio", "elimina el audio", "sin sonido"))
-    sustitucion(clip, carpeta/"marca.png", archivo, grupos, (w,h), silenciar)
+    from tinta_video import acabado_impreso
+    curva = bool(re.search(r"\b(?:vaso|copa|botella|taza|lata|cilindro)\b", texto, re.I))
+    sustitucion(clip, carpeta/"marca.png", archivo, grupos, (w,h), silenciar,
+                impreso=acabado_impreso(texto), curva=curva)
     if not silenciar:
         info_salida = subprocess.run([ffmpeg(), "-hide_banner", *entrada_video(archivo)], capture_output=True, timeout=10)
         if b"Audio:" in info_salida.stderr:
