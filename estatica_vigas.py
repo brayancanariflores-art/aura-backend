@@ -22,9 +22,9 @@ class CargaDistribuida(BaseModel):
 
 class Viga(BaseModel):
     tramos_m: list[float] = Field(description="Distancias consecutivas entre marcas de la línea de cotas, de izquierda a derecha. El primer nodo es 0; nunca uses coordenadas acumuladas aquí.")
-    apoyo_izquierdo: int
-    apoyo_derecho: int
-    corte: int
+    apoyo_izquierdo: int = Field(description="Índice de nodo del apoyo A, no una distancia en metros.")
+    apoyo_derecho: int = Field(description="Índice de nodo del apoyo B, no una distancia en metros.")
+    corte: int = Field(description="Índice del nodo señalado por el punto C, no su coordenada.")
     puntuales: list[CargaPuntual]
     pares: list[ParAplicado]
     distribuidas: list[CargaDistribuida] = Field(description="Un tramo por intervalo de intensidad lineal. Una carga triangular con vértice interior requiere dos tramos, uno creciente y uno decreciente.")
@@ -95,6 +95,7 @@ def resolver_viga(viga):
     sentido_v = "abajo" if viga.cortante_positivo_hacia_abajo else "arriba"
     sentido_m = "antihorario" if viga.momento_positivo_antihorario else "horario"
     return (f"Respuesta en C: N = 0 kN, V = {n(cortante)} kN, M = {n(flector)} kN·m.\n"
+            f"Distancias desde el extremo izquierdo: A = {n(a)} m, B = {n(b)} m, C = {n(c)} m.\n"
             f"Reacciones verticales: A = {n(ra)} kN, B = {n(rb)} kN (positivo hacia arriba). "
             f"Carga vertical total = {n(f)} kN; hasta C = {n(fc)} kN.\n"
             f"Convención en la cara del tramo izquierdo: V positivo hacia {sentido_v}, M positivo {sentido_m}.")
