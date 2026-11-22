@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import re
 import shutil
 import tempfile
@@ -21,6 +22,8 @@ from estudio_medios import MEDIDAS, ejecutar, entrada_video, reel_narrado
 from formato_chat import lienzo_pedido
 from marca_video import editar_marca
 from tamano_marca import solo_tamano
+from ajustes_marca import AjusteNoAplicado, pide_posicion, pide_limpieza
+from texto_logo import cambio_de_leyenda
 
 
 class PedidoReel(BaseModel):
@@ -185,6 +188,15 @@ def preparar_reel(carpeta, texto, cliente, modelo):
                         subtitulos=subtitulos, idioma_voz=idioma_voz, idioma_subtitulos=idioma_subtitulos, audio_original=audio_original)[0]
 
 
+def huella_medios(ruta):
+    # Compara las pistas con sus tiempos y subtítulos, ignorando las etiquetas del archivo.
+    return ejecutar([
+        "-v", "error", *entrada_video(ruta), "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?",
+        "-c", "copy", "-map_metadata:g", "-1", "-fflags", "+bitexact",
+        "-movflags", "empty_moov+frag_keyframe", "-f", "mp4", "md5:pipe:1",
+    ], salida=True)
+
+
 def conectar_reels(app, autorizar, cliente, modelo):
     raiz = Path(tempfile.gettempdir()) / "aura-chat-reels"
     raiz.mkdir(mode=0o700, exist_ok=True)
@@ -193,18 +205,24 @@ def conectar_reels(app, autorizar, cliente, modelo):
     def ejecutar_trabajo(carpeta, texto):
         try:
             archivo = preparar_reel(carpeta, texto, cliente, modelo)
+            anterior = carpeta / "revision-anterior.mp4"
+            if anterior.exists() and huella_medios(anterior) == huella_medios(archivo):
+                raise AjusteNoAplicado("La revisión produjo el mismo video y audio. El ajuste solicitado no se aplicó.")
             archivo.replace(carpeta / "listo.mp4")
+        except AjusteNoAplicado as exc:
+            (carpeta / "aviso-edicion").touch()
+            (carpeta / "error").write_text(str(exc))
         except Exception as exc:
             logging.getLogger(__name__).warning("Reel fallido (%s)", type(exc).__name__)
             mensaje = "No pude localizar y sustituir la marca. Indica en qué momento y sobre qué objeto aparece." if (carpeta / "marca.png").is_file() else ""
             (carpeta / "error").write_text(mensaje)
         finally:
-            conservar = {"pedido", "listo.mp4", "error"}
+            conservar = {"pedido", "listo.mp4", "error", "aviso-edicion"}
             completado = (carpeta / "listo.mp4").is_file()
             if completado:
                 conservar.update({"version.json", "escenas.jpg", "audio-original.m4a"})
                 if (carpeta / "marca.png").is_file():
-                    conservar.update({"marca.png", "entrada.mp4", "instruccion-marca", "pista-conservada", "trayectoria-marca.json"})
+                    conservar.update({"marca.png", "entrada.mp4", "instruccion-marca", "pista-conservada", "trayectoria-marca.json", "ajuste-superficie.json", "logo-editado.png"})
             for ruta in carpeta.iterdir():
                 cache_voz = completado and re.fullmatch(r"voz-[0-9a-f]{64}\.pcm", ruta.name)
                 if ruta.name not in conservar and not cache_voz:
@@ -290,11 +308,16 @@ def conectar_reels(app, autorizar, cliente, modelo):
                     if marca:
                         (carpeta / "marca.png").write_bytes(marca)
                         (carpeta / "instruccion-marca").write_text(texto)
+                    if pedido.anterior:
+                        os.link(padre / "listo.mp4", carpeta / "revision-anterior.mp4")
                     if previa_marca:
                         for nombre in ("marca.png", "entrada.mp4"):
                             shutil.copyfile(padre / nombre, carpeta / nombre)
+                        for opcion in ("ajuste-superficie.json", "logo-editado.png"):
+                            if (padre / opcion).is_file():
+                                shutil.copyfile(padre / opcion, carpeta / opcion)
                         trayectoria = padre / "trayectoria-marca.json"
-                        if trayectoria.is_file() and solo_tamano(texto):
+                        if trayectoria.is_file() and "guía de movimiento:" not in texto.lower() and (solo_tamano(texto) or pide_posicion(texto) or pide_limpieza(texto) or cambio_de_leyenda(texto)):
                             shutil.copyfile(trayectoria, carpeta / trayectoria.name)
                         texto = (padre / "instruccion-marca").read_text()[:4000] + "\nAjuste solicitado: " + texto
                         (carpeta / "instruccion-marca").write_text(texto[-8000:])
@@ -329,6 +352,7 @@ def conectar_reels(app, autorizar, cliente, modelo):
         if (carpeta / "error").exists() or time.time() - carpeta.stat().st_mtime > 600:
             fallo = carpeta / "error"
             if fallo.is_file() and fallo.read_text().strip():
-                raise HTTPException(422, fallo.read_text())
+                headers = {"X-Aura-Edicion": "ajuste-no-aplicado"} if (carpeta/"aviso-edicion").exists() else None
+                raise HTTPException(422, fallo.read_text(), headers=headers)
             raise HTTPException(502, "No se pudo completar el reel.")
         return JSONResponse({"estado": "preparando"}, status_code=202, headers=privado)

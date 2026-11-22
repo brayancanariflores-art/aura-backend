@@ -2,6 +2,7 @@
 import base64
 import io
 import json
+import re
 import tempfile
 from pathlib import Path
 
@@ -235,8 +236,15 @@ def buscar_al_final(clip, texto, cliente, modelo, duracion, tam):
         if ruta.stat().st_size<4*w*h*3:
             return None
         frames=np.memmap(ruta,dtype="uint8",mode="r").reshape(-1,h,w,3)
-        for pos in (.99,.81,.68):
-            i=round((len(frames)-1)*pos)
+        indices = [round((len(frames)-1)*pos) for pos in (.99,.81,.68)]
+        # Un tiempo señalado por el usuario sirve para reconocer la impresión;
+        # el seguimiento se mide en el clip hacia ambos lados de esa vista.
+        referencia = re.search(r"(?:en el segundo|segundo de referencia|segundo)\s+(\d+(?:[.,]\d+)?)\s*(?:como referencia|se ve de frente)",texto,re.I)
+        if referencia:
+            t=float(referencia[1].replace(",","."))
+            if 0<=t<duracion:
+                indices.insert(0,min(len(frames)-1,round(t*fps)))
+        for i in dict.fromkeys(indices):
             opciones=anclas(canales(frames[i]))
             if not opciones: continue
             hallada=escoger_marca(servicio,modelo,texto,frames[i],opciones)

@@ -235,6 +235,128 @@ def reconstruir(foto, mascara, alto, afinidad, limite):
     return np.clip(fondo+.52*np.clip(grano, -.08, .08), 0, 1)
 
 
+def superficie_limpia(foto, u, v, alto, mascara, afinidad, limite):
+    """Separar tinta de material por la cromaticidad observada fuera de la impresión."""
+    rgb = foto.astype(np.float32)/255
+    total = rgb.sum(2)
+    sat = np.ptp(rgb,axis=2)/np.maximum(.03,rgb.max(2))
+    candidatos = ((v>1.09)&(v<1.7)&(u>.14)&(u<.86)&(limite>.9)&
+                  (sat>.32)&(total>.24)&(afinidad>.58))
+    if candidatos.sum()<30:
+        return mascara, None
+    # El percentil ignora las burbujas y los reflejos especulares de la muestra.
+    hsv=np.asarray(Image.fromarray(foto).convert("HSV"),dtype=np.float32)
+    tono=hsv[:,:,0]
+    hist=ndimage.gaussian_filter1d(np.bincount(tono[candidatos].astype(int),minlength=256).astype(float),2,mode="wrap")
+    distancia=np.abs((tono-hist.argmax()+128)%256-128)
+    if np.mean(distancia[candidatos]<15)<.65:
+        return mascara,None
+    tolerancia=float(np.clip(np.percentile(distancia[candidatos],58)+2.5,3,8))
+    # La tinta antigua ocupa una silueta común, pero deja huecos de vidrio limpio.
+    # Unir sus componentes aquí evita que las letras reaparezcan al mover el arte.
+    filas,cols=np.nonzero(mascara)
+    if len(filas)<4:
+        return mascara,None
+    puntos=np.column_stack((cols,filas))
+    try:
+        vertices=puntos[ConvexHull(puntos).vertices]
+    except QhullError:
+        return mascara,None
+    silueta=Image.new("L",(foto.shape[1],foto.shape[0]))
+    ImageDraw.Draw(silueta).polygon([tuple(p) for p in vertices.tolist()],fill=1)
+    silueta=ndimage.maximum_filter(np.asarray(silueta),size=max(5,round(alto*.14))|1)>0
+    cerca = (u>-.10)&(u<1.12)&(v>-.08)&(v<1.10)&(limite>.4)
+    limpio = np.clip((tolerancia*1.20-distancia)/max(.015,tolerancia*.45),0,1)
+    limpio *= np.clip(total/.22,0,1)*np.clip((sat-.28)/.30,0,1)
+    intacto = ndimage.minimum_filter(limpio,size=max(3,round(alto*.022))|1)
+    campo = silueta & cerca
+    saturada=(sat>.35)&(rgb.max(2)>.30)
+    pigmentos=campo & saturada & (distancia>tolerancia*1.45)
+    if pigmentos.sum()<max(10,.015*campo.sum()):
+        return mascara,None
+    hist_tinta=ndimage.gaussian_filter1d(np.bincount(tono[pigmentos].astype(int),minlength=256).astype(float),2,mode="wrap")
+    delta=np.abs((tono-hist_tinta.argmax()+128)%256-128)
+    color_tinta=campo & saturada & (delta<11) & (distancia>tolerancia*.76)
+    cerca_color=ndimage.distance_transform_edt(~color_tinta)<max(5,alto*.54)
+    primer_trazo=np.min(np.where(color_tinta)[0]) if color_tinta.any() else 0
+    bajo_espuma = np.arange(foto.shape[0])[:,None] >= primer_trazo-alto*.07
+    claros=(sat<.42)&(rgb.max(2)>.51)
+    tinta=color_tinta|(campo & claros & cerca_color & bajo_espuma)
+    contorno=(rgb.max(2)<.40)&(ndimage.distance_transform_edt(~tinta)<max(4,alto*.065))
+    tinta |= campo & contorno
+    tinta=ndimage.maximum_filter(tinta,size=max(5,round(alto*.060))|1)
+    return tinta & (limite>.35),intacto
+
+
+
+def muestra_de_textura(fotograma, caja):
+    """Elegir una muestra bidimensional bajo la impresión en una vista frontal."""
+    x,y,w,h=caja
+    lado=max(12,round(min(w,h)*.54))
+    mejor, puntuacion=None,0.
+    for fx in (.15,.36,.57):
+        for fy in (1.10,1.34):
+            x0,y0=round(x+fx*w),round(y+fy*h)
+            if x0<0 or y0<0 or x0+lado>fotograma.width or y0+lado>fotograma.height:
+                continue
+            muestra=fotograma.crop((x0,y0,x0+lado,y0+lado)).resize((80,80),Image.Resampling.BILINEAR)
+            rgb=np.asarray(muestra,dtype=np.float32)/255
+            luminancia=rgb@np.array([.30,.57,.13],dtype=np.float32)
+            detalle=luminancia-ndimage.gaussian_filter(luminancia,3.8)
+            gy,gx=np.gradient(luminancia)
+            # Penalizar un solo filo fuerte o una fuente quemada; preferir grano repartido.
+            matriz=np.array([[np.mean(gx*gx),np.mean(gx*gy)],[np.mean(gx*gy),np.mean(gy*gy)]])
+            menor,mayor=np.linalg.eigvalsh(matriz)
+            energia=np.percentile(np.abs(detalle),78)
+            nota=energia*max(0,menor)/(mayor+.00001)*np.mean((luminancia>.07)&(luminancia<.88))
+            if nota>puntuacion and energia>.006:
+                puntuacion,mejor=nota,np.clip(detalle,-.10,.15)
+    return mejor
+
+
+def textura_de_superficie(foto, mascara, afinidad, limite, alto):
+    """Transportar detalle de zonas limpias sin estirar filas sobre la marca."""
+    rgb = foto.astype(np.float32)/255
+    sigma = max(1.2,min(4.,alto*.024))
+    detalle = rgb - ndimage.gaussian_filter(rgb,(sigma,sigma,0))
+    libre = (~ndimage.maximum_filter(mascara,size=5))*afinidad*limite
+    confianza = ndimage.uniform_filter(libre.astype(np.float32),size=max(5,round(sigma*4))|1)
+    if libre.sum()<8:
+        return reconstruir(foto,mascara,alto,afinidad,limite)
+    # Reducir el color premultiplicado por la confianza; así la tinta vecina
+    # no se filtra en las muestras limpias al bajar o subir la resolución.
+    paso = 3
+    pesos = ndimage.uniform_filter(libre,size=paso)[::paso,::paso]
+    color = ndimage.uniform_filter(rgb*libre[:,:,None],size=(paso,paso,1))[::paso,::paso]
+    validos=pesos>.08
+    if not validos.any():
+        return reconstruir(foto,mascara,alto,afinidad,limite)
+    _,indices=ndimage.distance_transform_edt(~validos,return_indices=True)
+    base=color/np.maximum(pesos[:,:,None],.015)
+    fondo=ndimage.gaussian_filter(base[indices[0],indices[1]],(4,4,0))
+    for difusion in (max(5,alto*.11),max(3,alto*.045),max(1.3,alto*.016)):
+        den = ndimage.gaussian_filter(pesos,difusion)
+        est = ndimage.gaussian_filter(color,(difusion,difusion,0))/np.maximum(den[:,:,None],.00001)
+        mezcla = np.clip(den/.14,0,1)[:,:,None]
+        fondo += mezcla*(est-fondo)
+    fondo = np.stack([np.asarray(Image.fromarray(c).resize((foto.shape[1],foto.shape[0]),Image.Resampling.BILINEAR))
+                      for c in fondo.transpose(2,0,1)],axis=2)
+    yy, xx = np.indices(mascara.shape)
+    suma = np.zeros_like(rgb)
+    peso = np.zeros(mascara.shape,dtype=np.float32)
+    for dy, dx in ((.86,.06),(.68,-.22),(.15,.68),(.11,-.67),(-.52,.08)):
+        sy = yy + round(alto*dy)
+        sx = xx + round(alto*dx)
+        dentro = (sy>=0)&(sy<foto.shape[0])&(sx>=0)&(sx<foto.shape[1])
+        sy, sx = sy.clip(0,foto.shape[0]-1), sx.clip(0,foto.shape[1]-1)
+        valido = dentro * libre[sy,sx] * confianza[sy,sx]**2
+        suma += detalle[sy,sx]*valido[:,:,None]
+        peso += valido
+    grano = np.clip(suma/np.maximum(peso[:,:,None],.02),-.12,.16)
+    mezcla = np.clip(peso/.28,0,1)[:,:,None]
+    return np.clip(fondo + mezcla*.88*grano,0,1)
+
+
 def desenfoque_borde(fotograma, forma):
     """Medir la transición de luz cerca del borde físico del recipiente."""
     centro, radio, cima, pendiente = forma
@@ -261,10 +383,13 @@ def desenfoque_borde(fotograma, forma):
     return min(4.5, .88*math.sqrt(max(0., sigma*sigma-1.8**2)))
 
 
-def imprimir(fotograma, caja, arte, vista, curva, estado=None, escala=1.):
+def imprimir(fotograma, caja, arte, vista, curva, estado=None, escala=1., posicion=(0.,0.), limpiar=False, textura=None):
     x, y, w, h = caja
     margen = max(6, round(max(w,h)*(.44 if estado is not None else .34)))
-    region = (max(0,x-margen), max(0,y-margen), min(fotograma.width,x+w+margen), min(fotograma.height,y+h+margen))
+    mx = margen + math.ceil(w*abs(posicion[0]))
+    my = margen + math.ceil(h*abs(posicion[1]))
+    donante = math.ceil(h*.56) if limpiar else 0
+    region = (max(0,x-mx), max(0,y-my), min(fotograma.width,x+w+mx), min(fotograma.height,y+h+my+donante))
     recorte = fotograma.crop(region)
     original = recorte.size
     recorte.thumbnail((432,432),Image.Resampling.LANCZOS)
@@ -292,25 +417,55 @@ def imprimir(fotograma, caja, arte, vista, curva, estado=None, escala=1.):
         claro = (f[:,:,0]>.57)&(f[:,:,1]>.57*f[:,:,0])&(f[:,:,2]>.65*f[:,:,1])
         ribete = cerca & claro & (py>.09) & (py<1.03) & (limite>.55)
         mascara |= ndimage.maximum_filter(ribete,size=5)
+    if limpiar and anterior is not None:
+        # La máscara común puede omitir un filete que sólo se distingue durante
+        # una parte del giro. Incluir trazos detectados en ese fotograma.
+        extra = extension_tinta(foto,u,v,alto,afinidad,limite)
+        cerca = ndimage.maximum_filter(mascara,size=max(3,round(alto*.25))|1)
+        mascara |= extra & cerca & (limite>.55)
+    intacto_local=None
+    if limpiar and curva:
+        mascara,intacto_local=superficie_limpia(foto,u,v,alto,mascara,afinidad,limite)
     opacidad = ndimage.gaussian_filter(mascara.astype(np.float32), max(.65, alto*.014))
-    if np.any(afinidad<1):
+    if intacto_local is not None:
+        opacidad *= 1-.96*intacto_local
+    elif np.any(afinidad<1):
         # Conservar el vidrio que ya se ve entre tintas y suavizar la transición
         # alrededor de los trazos que sí es necesario reconstruir.
         intacto = ndimage.minimum_filter(afinidad, size=max(3,round(alto*.035)))
         opacidad *= 1-.98*np.clip((intacto-.55)/.44,0,1)
     opacidad *= limite
     muestras = afinidad * np.clip((v+.025)/.08,0,1)
-    fondo = reconstruir(foto, mascara, alto, muestras, limite)
+    excluir = mascara if intacto_local is None else mascara & (intacto_local<.86)
+    if limpiar and intacto_local is not None:
+        rgb=foto.astype(np.float32)/255
+        saturacion=np.ptp(rgb,axis=2)/np.maximum(.03,rgb.max(2))
+        material=(saturacion>.39)|(rgb.max(2)<.43)
+        muestras = material*np.maximum(.38,afinidad)*np.clip((v+.17)/.11,0,1)
+    fondo = (textura_de_superficie(foto, excluir, muestras, limite, alto) if limpiar else
+             reconstruir(foto, mascara, alto, muestras, limite))
+    if limpiar and textura is not None:
+        # La misma muestra queda registrada sobre el material durante el giro;
+        # usarla antes de desplazar la nueva impresión evita que ambas zonas se confundan.
+        grano=ndimage.map_coordinates(textura,[py*textura.shape[0]*2.1,px*textura.shape[1]*2.1],
+                                     order=1,mode="reflect")
+        luz=np.mean(fondo,axis=2,keepdims=True)
+        tinte=np.clip((fondo+.12)/(luz+.12),.45,1.7)
+        fondo=np.clip(fondo+.53*grano[:,:,None]*tinte,0,1)
     original_rgb = foto.astype(np.float32)/255
     base = original_rgb*(1-opacidad[:,:,None])+fondo*opacidad[:,:,None]
     # Escalar únicamente la textura en coordenadas del material, una vez
     # reconstruida la impresión antigua. Su centro permanece fijo al girar.
-    px = .5 + (px-.5)/escala
-    py = .5 + (py-.5)/escala
+    # Un desplazamiento expresado como fracción del diseño frontal queda fijo
+    # en la superficie incluso cuando esa superficie se ve de perfil.
+    aspecto_frontal = vista[0] if curva else w/h
+    proporcion = arte.shape[1]/arte.shape[0]
+    px = .5 + (px-.5-posicion[0]*max(1.,aspecto_frontal/proporcion))/escala
+    py = .5 + (py-.5-posicion[1]*max(1.,proporcion/aspecto_frontal))/escala
     coords = [py*(arte.shape[0]-1), px*(arte.shape[1]-1)]
     estampado = np.stack([ndimage.map_coordinates(arte[:,:,c], coords, order=1, mode="constant") for c in range(4)], 2)
     visible = (u>=0)&(u<=1)&(v>=0)&(v<=1)
-    if estado is not None or escala != 1:
+    if estado is not None or escala != 1 or any(posicion):
         visible = (px>=0)&(px<=1)&(py>=0)&(py<=1)
         if curva and estado is None:
             visible &= normal > 1e-5

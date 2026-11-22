@@ -12,6 +12,7 @@ from bisect import bisect_right
 
 from PIL import Image, ImageDraw, ImageOps
 
+from ajustes_marca import ancla_frontal, planificar
 from tamano_marca import escala_marca
 from estudio_medios import ejecutar, entrada_video, ffmpeg, inspeccionar
 
@@ -232,7 +233,7 @@ def preparar_placa(logo):
     return placa
 
 
-def sustitucion(clip, logo, archivo, grupos, tam, silenciar=False, *, impreso=False, curva=False, escala=1.):
+def sustitucion(clip, logo, archivo, grupos, tam, silenciar=False, *, impreso=False, curva=False, escala=1., posicion=(0., 0.), limpiar=False):
     # Una capa transparente en coordenadas del original. El reloj de la pista de video
     # original determina los fotogramas de salida, incluso para clips de tasa variable.
     ancho, alto = tam
@@ -253,11 +254,30 @@ def sustitucion(clip, logo, archivo, grupos, tam, silenciar=False, *, impreso=Fa
         from tinta_video import imprimir, preparar_tinta, vista_frontal
         arte = preparar_tinta(logo)
         vistas = [vista_frontal(g) for g, _ in grupos]
+        texturas = [None]*len(grupos)
+        if limpiar:
+            from tinta_video import muestra_de_textura
+            for indice, grupo in enumerate(grupos):
+                t,x,y,w,h=ancla_frontal([grupo])
+                jpg=ejecutar(["-v","error","-ss",str(t),*entrada_video(clip),"-frames:v","1",
+                              "-f","image2pipe","-c:v","mjpeg","pipe:1"],salida=True)
+                with Image.open(io.BytesIO(jpg)) as foto:
+                    texturas[indice]=muestra_de_textura(foto,(x,y,w,h))
         registros = [None]*len(grupos)
         if curva:
             from registro_superficie import preparar_registros
             registros = preparar_registros(clip, grupos, (origen_x,origen_y,*size))
             log.info("Registro óptico de la impresión en %s de %s tramos", sum(r is not None for r in registros), len(grupos))
+        # Registrar en el recorte habitual. Ampliar solo la ventana de composición
+        # para que el nuevo dibujo y las muestras limpias quepan tras desplazarlo.
+        registro_x, registro_y = origen_x, origen_y
+        amplitud = max(p[3] for g, _ in grupos for p in g)
+        altura = max(p[4] for g, _ in grupos for p in g)
+        extra_x = math.ceil(abs(posicion[0])*amplitud)
+        extra_y = math.ceil(abs(posicion[1])*altura + (altura*.56 if limpiar else 0))
+        origen_x = max(0, origen_x-extra_x)//2*2
+        origen_y = max(0, origen_y-extra_y)//2*2
+        size = (min(ancho, der+extra_x)-origen_x, min(alto, inf+extra_y)-origen_y)
     else:
         arte = preparar_placa(logo)
     tiempos = [[p[0] for p in g] for g, _ in grupos]
@@ -299,11 +319,18 @@ def sustitucion(clip, logo, archivo, grupos, tam, silenciar=False, *, impreso=Fa
                 if impreso:
                     registro = registros[indice]
                     estado = registro.en(t) if registro is not None else None
-                    sello, posicion = imprimir(superficie, caja, arte, vistas[indice], curva, estado, escala)
+                    if estado is not None:
+                        forma, *resto = estado
+                        forma = forma.copy()
+                        forma[0] += registro_x-origen_x
+                        forma[2] += registro_y-origen_y
+                        estado = (forma, *resto)
+                    sello, esquina = imprimir(superficie, caja, arte, vistas[indice], curva, estado,
+                                              escala, posicion, limpiar, texturas[indice])
                 else:
                     sello = arte.resize(caja[2:], Image.Resampling.LANCZOS)
-                    posicion = caja[:2]
-                lienzo.paste(sello, posicion)
+                    esquina = caja[:2]
+                lienzo.paste(sello, esquina)
                 break
             proc.stdin.write(lienzo.tobytes())
         proc.stdin.close()
@@ -343,7 +370,9 @@ def editar_marca(carpeta, texto, cliente, modelo):
     ruta_trayectoria = carpeta / "trayectoria-marca.json"
     grupos = (json.loads(ruta_trayectoria.read_text()) if ruta_trayectoria.is_file()
               else trayectoria_guiada(texto, w, h, info["duracion"]))
-    if grupos is None and re.search(r"\b(?:al|el|hacia el|sobre el)\s+final\b", texto, re.I) and not re.search(r"\b(?:desde|a partir de)\b",texto,re.I):
+    toma_final = re.search(r"\b(?:al|el|hacia el|sobre el)\s+final\b", texto, re.I) and not re.search(r"\b(?:desde|a partir de)\b",texto,re.I)
+    referencia = re.search(r"segundo\s+\d+(?:[.,]\d+)?\s*(?:como referencia|se ve de frente)",texto,re.I)
+    if grupos is None and (toma_final or referencia):
         from seguimiento_marca import buscar_al_final
         grupos = buscar_al_final(clip, texto, cliente, modelo, info["duracion"], (w,h))
     if grupos is None:
@@ -354,8 +383,17 @@ def editar_marca(carpeta, texto, cliente, modelo):
     silenciar = any(palabra in texto.lower() for palabra in ("sin audio", "quita el audio", "elimina el audio", "sin sonido"))
     from tinta_video import acabado_impreso
     curva = bool(re.search(r"\b(?:vaso|copa|botella|taza|lata|cilindro)\b", texto, re.I))
-    sustitucion(clip, carpeta/"marca.png", archivo, grupos, (w,h), silenciar,
-                impreso=acabado_impreso(texto), curva=curva, escala=escala_marca(texto))
+    plan_path = carpeta / "ajuste-superficie.json"
+    anterior = json.loads(plan_path.read_text()) if plan_path.exists() else {}
+    orden = texto.rsplit("\nAjuste solicitado:", 1)[-1].split("Guía de movimiento:")[0]
+    impreso = acabado_impreso(texto)
+    plan = planificar(clip, grupos, (w,h), orden, anterior, cliente, modelo) if impreso else {}
+    from texto_logo import preparar_leyenda
+    logo = preparar_leyenda(carpeta, orden, cliente, modelo)
+    sustitucion(clip, logo, archivo, grupos, (w,h), silenciar,
+                impreso=impreso, curva=curva, escala=escala_marca(texto),
+                posicion=plan.get('posicion',(0.,0.)), limpiar=plan.get('limpiar',False))
+    plan_path.write_text(json.dumps(plan))
     if not silenciar:
         info_salida = subprocess.run([ffmpeg(), "-hide_banner", *entrada_video(archivo)], capture_output=True, timeout=10)
         if b"Audio:" in info_salida.stderr:
