@@ -2,6 +2,7 @@
 from fractions import Fraction
 from math import isfinite
 from soluciones import Desarrollo, Paso
+from diagramas_viga import dibujar_curvas, dibujar_viga
 from pydantic import BaseModel, Field
 
 
@@ -49,7 +50,7 @@ def medida(valor):
     return Fraction(str(valor))
 
 
-def desarrollar_viga(viga):
+def desarrollar_viga(viga, diagramas=None):
     x = [Fraction(0)]
     for tramo in viga.tramos_m:
         if not isfinite(tramo) or tramo <= 0:
@@ -74,26 +75,38 @@ def desarrollar_viga(viga):
             raise ValueError("tramo de carga")
         tramos.append((inicio, fin, medida(q.intensidad_inicial_kN_m_hacia_abajo), medida(q.intensidad_final_kN_m_hacia_abajo)))
 
-    def cargas(limite):
-        fuerza = sum(p for pos, p in fuerzas if pos <= limite)
-        momento = sum(pos * p for pos, p in fuerzas if pos <= limite)
+    def cargas(limite, incluir_nodo=True):
+        fuerza = sum(p for pos, p in fuerzas if pos < limite or (incluir_nodo and pos == limite))
+        momento = sum(pos * p for pos, p in fuerzas if pos < limite or (incluir_nodo and pos == limite))
         for tramo in tramos:
             f, m = resultante_lineal(*tramo, limite)
             fuerza += f
             momento += m
-        return fuerza, momento, sum(m for pos, m in pares if pos <= limite)
+        return fuerza, momento, sum(m for pos, m in pares if pos < limite or (incluir_nodo and pos == limite))
 
     f, m, par = cargas(x[-1])
     rb = (m - a*f - par) / (b-a)
     ra = f - rb
     fc, mc, pc = cargas(c)
     reacciones = [(a, ra), (b, rb)]
-    cortante = sum(r for pos, r in reacciones if pos < c) - fc
-    flector = sum((c-pos)*r for pos, r in reacciones if pos < c) - (c*fc-mc) - pc
+    def esfuerzos(limite, incluir_nodo):
+        carga, primer_momento, par_local = cargas(limite, incluir_nodo)
+        apoyos = [(pos, r) for pos, r in reacciones if pos < limite or (pos == limite and incluir_nodo)]
+        v = sum(r for pos, r in apoyos) - carga
+        m_local = sum((limite-pos)*r for pos, r in apoyos) - limite*carga + primer_momento - par_local
+        return v, m_local
+    cortante, flector = esfuerzos(c, True)
     derecha_v = (f-fc) - sum(r for pos, r in reacciones if pos > c)
     derecha_m = sum((pos-c)*r for pos, r in reacciones if pos > c) - ((m-mc)-c*(f-fc)) + par-pc
     if cortante != derecha_v or flector != derecha_m:
         raise ValueError("equilibrio")
+    if diagramas is not None and len(x) <= 65 and len(tramos)+len(fuerzas)+len(pares) <= 128:
+        def seccion(pos, incluir_nodo):
+            v, momento = esfuerzos(pos, incluir_nodo)
+            return (v if viga.cortante_positivo_hacia_abajo else -v,
+                    momento if viga.momento_positivo_antihorario else -momento)
+        diagramas["cuerpo"] = dibujar_viga(x, c, reacciones, fuerzas, pares, tramos, cortante, flector)
+        diagramas["curvas"] = dibujar_curvas(x, c, seccion)
     if not viga.cortante_positivo_hacia_abajo:
         cortante = -cortante
     if not viga.momento_positivo_antihorario:

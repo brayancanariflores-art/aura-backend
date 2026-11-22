@@ -1,4 +1,5 @@
 import unittest
+from xml.etree import ElementTree
 from estatica_vigas import CargaDistribuida, CargaPuntual, ParAplicado, Viga, desarrollar_viga, resolver_viga
 
 
@@ -27,6 +28,19 @@ class Equilibrio(unittest.TestCase):
     def test_corte_en_intermedio_de_una_carga_triangular(self):
         datos = viga([1.5,1.5,3], 0,3,1, [(0,2,0,6),(2,3,6,0)])
         self.assertIn("V = 6,75 kN, M = 12,375 kN·m", resolver_viga(datos))
+
+    def test_diagramas_reflejan_el_corte_y_la_convencion(self):
+        datos = viga([1.5,1.5], 0,2,1, [(0,1,4,4),(1,2,8,8)])
+        datos.momento_positivo_antihorario = False
+        diagramas = {}
+        solucion = desarrollar_viga(datos, diagramas)
+        esquema = list(ElementTree.fromstring(diagramas["cuerpo"]).itertext())
+        curvas = list(ElementTree.fromstring(diagramas["curvas"]).itertext())
+        self.assertIn("Tramo izquierdo hasta C", esquema)
+        self.assertIn("B: 10,5 kN", esquema)
+        self.assertIn("En C: 1,5 kN", curvas)
+        self.assertIn("En C: -6,75 kN·m", curvas)
+        self.assertIn("M = -6,75 kN·m", solucion.lectura)
 
     def test_conserva_fracciones_y_aproxima_debajo(self):
         datos = viga([1,1,1], 0,3,1, puntuales=[(2,1)])

@@ -37,7 +37,7 @@ GUIA_CONSULTA = (
 
 class Solucion(BaseModel):
     ejercicio: str
-    viga: Viga | None = Field(description="Si se piden N,V,M en C de una viga horizontal con articulación y rodillo, solo cargas verticales y pares, transcribe su geometría y todas sus cargas en kN y m. Usa null para otros problemas o si no puedes leer los datos.")
+    viga: Viga | None = Field(description="Si se piden los esfuerzos en C o los diagramas de una viga horizontal con articulación y rodillo, solo cargas verticales y pares, transcribe su geometría y todas sus cargas en kN y m. Usa null para otros problemas o si no puedes leer los datos.")
     desarrollo: Desarrollo | None = Field(description="Desarrollo del ejercicio, o null si viga contiene el diagrama.")
 
 
@@ -52,7 +52,10 @@ def consultar_adjunto(cliente, modelo, contenido, texto):
     peticion = texto.partition("\nConsulta anterior sobre este archivo:")[0]
     solo_lectura = re.search(r"\b(?:pistas?|traduce|transcribe|qu[eé] dice|sin (?:resolver|dar\w* (?:la|el) (?:resultado|respuesta))|"
                              r"no (?:me )?(?:lo resuelvas|resuelvas|digas|des|desveles))\b", peticion, re.I)
-    if resolver and not solo_lectura:
+    diagramar = re.search(r"\b(?:diagramas?|gr[áa]fic[ao]s?|cuerpo libre|dcl|cortante|flector)\b", peticion, re.I)
+    if diagramar and re.search(r"\b(?:flujo|circuito|entidad|clases|venn|organigrama)\b", peticion, re.I):
+        diagramar = None
+    if (resolver or diagramar) and not solo_lectura:
         modelo_ejercicios = os.environ.get("AURA_MODELO_EJERCICIOS", "gpt-5.4")
         opciones = {"reasoning": {"effort": "medium"}} if modelo_ejercicios.startswith("gpt-5") else {}
         lector = cliente.with_options(timeout=135, max_retries=0)
@@ -83,10 +86,11 @@ def consultar_adjunto(cliente, modelo, contenido, texto):
         ejercicios = []
         solo_resultado = re.search(r"\b(?:solo|sólo|solamente|únicamente)\s+(?:(?:dame|quiero)\s+)?(?:el |los |la |las )?(?:resultados?|respuestas?)\b|\bsin (?:pasos|procedimiento)\b", peticion, re.I)
         for item in solucion.ejercicios:
+            diagramas = {}
             desarrollo = item.desarrollo
             if item.viga is not None:
                 try:
-                    desarrollo = desarrollar_viga(item.viga)
+                    desarrollo = desarrollar_viga(item.viga, diagramas)
                 except ValueError as error:
                     nota = f"No pude verificar el diagrama ({error}). Envía un acercamiento de ese apartado."
                     desarrollo = Desarrollo(pasos=[], exacto="", aproximacion="", nota=nota, lectura=nota)
@@ -96,7 +100,8 @@ def consultar_adjunto(cliente, modelo, contenido, texto):
                 raise HTTPException(502, "Faltó el resultado o el dato necesario para completar un ejercicio.")
             if solo_resultado:
                 desarrollo = desarrollo.model_copy(update={"pasos": []})
-            ejercicios.append({"ejercicio": item.ejercicio, **desarrollo.model_dump(exclude={"lectura"})})
+            ejercicios.append({"ejercicio": item.ejercicio, **desarrollo.model_dump(exclude={"lectura"}),
+                               **({"diagramas": diagramas} if diagramas else {})})
             lineas = [item.ejercicio, *(paso.explicacion for paso in desarrollo.pasos), desarrollo.lectura]
             if desarrollo.nota and desarrollo.nota not in desarrollo.lectura:
                 lineas.append(desarrollo.nota)
