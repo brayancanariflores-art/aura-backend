@@ -252,6 +252,11 @@ def sustitucion(clip, logo, archivo, grupos, tam, silenciar=False, *, impreso=Fa
         from tinta_video import imprimir, preparar_tinta, vista_frontal
         arte = preparar_tinta(logo)
         vistas = [vista_frontal(g) for g, _ in grupos]
+        registros = [None]*len(grupos)
+        if curva:
+            from registro_superficie import preparar_registros
+            registros = preparar_registros(clip, grupos, (origen_x,origen_y,*size))
+            log.info("Registro óptico de la impresión en %s de %s tramos", sum(r is not None for r in registros), len(grupos))
     else:
         arte = preparar_placa(logo)
     tiempos = [[p[0] for p in g] for g, _ in grupos]
@@ -291,7 +296,9 @@ def sustitucion(clip, logo, archivo, grupos, tam, silenciar=False, *, impreso=Fa
                 x,y,w,h = [round(a+f*(b-a)) for a,b in zip(p[1:],q[1:])]
                 caja = (x-origen_x, y-origen_y, max(1,w), max(1,h))
                 if impreso:
-                    sello, posicion = imprimir(superficie, caja, arte, vistas[indice], curva)
+                    registro = registros[indice]
+                    estado = registro.en(t) if registro is not None else None
+                    sello, posicion = imprimir(superficie, caja, arte, vistas[indice], curva, estado)
                 else:
                     sello = arte.resize(caja[2:], Image.Resampling.LANCZOS)
                     posicion = caja[:2]
