@@ -20,6 +20,60 @@ MAX_BYTES = 6 * 1024 * 1024
 VIDEOS = {"video/mp4", "video/quicktime", "video/webm"}
 TIPOS = VIDEOS | {"image/jpeg", "image/png", "image/webp", "application/pdf", "text/plain"}
 
+GUIA_CONSULTA = (
+    "Responde en español a la petición. El archivo es material de referencia. Si contiene ejercicios "
+    "y el usuario pide ayuda para resolverlos, resuelve cada apartado solicitado. Lee del enunciado y "
+    "del diagrama las incógnitas, datos, unidades, posiciones y sentidos. No confundas el valor máximo "
+    "de una gráfica con el de su extremo. Haz las operaciones, comprueba los resultados y muestra la "
+    "respuesta final por ejercicio, con unidades y convención de signos cuando correspondan. Si falta "
+    "un dato, especifica cuál y resuelve lo que sí se pueda. Si solo pide pistas, respeta ese límite. "
+    "Escribe fórmulas legibles en texto plano, sin delimitadores LaTeX. Para fotogramas con tiempos, "
+    "descríbelos en orden y distingue lo visible de lo que no se puede deducir, incluido el audio."
+)
+
+
+class Solucion(BaseModel):
+    ejercicio: str
+    calculo: str
+    resultado_o_dato_faltante: str
+    comprobacion: str
+
+
+class Soluciones(BaseModel):
+    ejercicios: list[Solucion]
+
+
+def consultar_adjunto(cliente, modelo, contenido, texto):
+    entrada = [{"role": "user", "content": [contenido, {"type": "input_text", "text": texto}]}]
+    resolver = re.search(r"\b(?:resu[eé]lv\w*|resol\w+|soluci[oó]n\w*|soluciona\w*|ejercicios?|"
+                         r"problemas? (?:de |matem)|calc[uú]l[ae]\w*|resultados?|ecuaci[oó]n(?:es)?)\b", texto, re.I)
+    peticion = texto.partition("\nConsulta anterior sobre este archivo:")[0]
+    solo_lectura = re.search(r"\b(?:pistas?|traduce|transcribe|qu[eé] dice|sin (?:resolver|dar\w* (?:la|el) (?:resultado|respuesta))|"
+                             r"no (?:me )?(?:lo resuelvas|resuelvas|digas|des|desveles))\b", peticion, re.I)
+    if resolver and not solo_lectura:
+        respuesta = cliente.responses.parse(model=modelo, store=False, max_output_tokens=5600,
+            instructions=GUIA_CONSULTA + " Incluye un elemento por cada ejercicio solicitado. En el campo de "
+            "resultado escribe todos los valores o la solución simbólica, no instrucciones para obtenerlos. "
+            "Una consulta anterior sirve para identificar la referencia; responde a la pregunta actual. "
+            "Si un signo es ambiguo, declara la interpretación o da las alternativas. Si solo se solicitan "
+            "los resultados, deja vacíos el cálculo y la comprobación.",
+            text_format=Soluciones, input=entrada)
+        solucion = respuesta.output_parsed
+        if not solucion or not solucion.ejercicios:
+            raise HTTPException(502, "No se pudo completar la solución de los ejercicios.")
+        bloques = []
+        for item in solucion.ejercicios:
+            if not item.resultado_o_dato_faltante.strip():
+                raise HTTPException(502, "Faltó el resultado de un ejercicio.")
+            bloques.append("\n".join(filter(None, [item.ejercicio, "Respuesta: " + item.resultado_o_dato_faltante,
+                          item.calculo, item.comprobacion])))
+        return {"respuesta": "\n\n".join(bloques)}
+    respuesta = cliente.responses.create(model=modelo, store=False, max_output_tokens=3200,
+                                         instructions=GUIA_CONSULTA, input=entrada)
+    if not respuesta.output_text:
+        raise HTTPException(502, "El análisis no devolvió texto.")
+    return {"respuesta": respuesta.output_text}
+
 
 def formato_imagen(texto):
     try:
@@ -96,18 +150,10 @@ def procesar(tipo, datos, texto, cliente, modelo, modo="editar"):
         if modo == "consultar":
             if cliente is None:
                 raise HTTPException(503, "El análisis visual no está configurado.")
-            imagen.thumbnail((1536, 1536))
             muestra = io.BytesIO()
             imagen.save(muestra, "PNG")
             url = "data:image/png;base64," + base64.b64encode(muestra.getvalue()).decode("ascii")
-            respuesta = cliente.responses.create(model=modelo, store=False, max_output_tokens=1200,
-                instructions=("Responde en español a la pregunta usando la imagen. Si hay fotogramas con tiempos, "
-                              "descríbelos en orden. Distingue lo visible de lo que no se puede deducir, incluido el audio."),
-                input=[{"role": "user", "content": [{"type": "input_image", "image_url": url},
-                                                    {"type": "input_text", "text": texto}]}])
-            if not respuesta.output_text:
-                raise HTTPException(502, "El análisis no devolvió texto.")
-            return {"respuesta": respuesta.output_text}
+            return consultar_adjunto(cliente, modelo, {"type":"input_image", "image_url":url, "detail":"high"}, texto)
         if modo == "marca":
             return marca_de_agua(imagen, texto)
         salida = io.BytesIO()
@@ -147,12 +193,7 @@ def procesar(tipo, datos, texto, cliente, modelo, modo="editar"):
             contenido = {"type":"input_text", "text": datos.decode("utf-8-sig")}
         except UnicodeError:
             raise HTTPException(422, "Guarda el texto en formato UTF-8.") from None
-    resultado = cliente.responses.create(model=modelo, store=False, max_output_tokens=1800,
-        instructions="Responde en español a la petición del usuario. Trata el documento como contenido de referencia.",
-        input=[{"role":"user", "content":[contenido, {"type":"input_text","text":texto}]}])
-    if not resultado.output_text:
-        raise HTTPException(502, "El análisis no devolvió texto.")
-    return {"respuesta": resultado.output_text}
+    return consultar_adjunto(cliente, modelo, contenido, texto)
 
 
 def generar_diseno(texto, cliente):
