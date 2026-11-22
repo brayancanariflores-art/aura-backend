@@ -1,5 +1,4 @@
 import json
-from diagnostico_autonomia import diagnosticar
 from urllib.parse import urlparse
 import hmac
 from difflib import SequenceMatcher
@@ -17,6 +16,8 @@ import uuid
 import urllib.parse
 import urllib.request
 from html import unescape
+
+from diagnostico_autonomia import diagnosticar
 
 import chromadb
 import uvicorn
@@ -4651,6 +4652,17 @@ def autonomia_investigaciones(limite: int = 20, _auth=Depends(autorizar)):
             FROM investigaciones_manuales ORDER BY creado DESC LIMIT ?""",
             (limite,)).fetchall()
     return {'investigaciones': [dict(f) for f in filas]}
+
+from estudio import conectar_estudio
+
+
+def memoria_editorial(nombre):
+    nombre_normal = normalizar_recuerdo(nombre)
+    return [contenido for _, contenido in listar_recuerdos()
+            if nombre_normal in normalizar_recuerdo(contenido) and es_informacion_segura(contenido)][:8]
+
+
+estudio_redes = conectar_estudio(app, DATA_DIR, autorizar, memoria_editorial, ai_client, MODEL)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
