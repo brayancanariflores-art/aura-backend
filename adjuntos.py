@@ -11,11 +11,14 @@ from fastapi.responses import Response
 from PIL import Image, ImageFilter, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, Field
 
+from uuid import UUID
+from ediciones_chat import ejecutar_edicion, cancelar
 from reels_chat import conectar_reels
 from formato_chat import lienzo_pedido
 
 MAX_BYTES = 6 * 1024 * 1024
-TIPOS = {"image/jpeg", "image/png", "image/webp", "application/pdf", "text/plain"}
+VIDEOS = {"video/mp4", "video/quicktime", "video/webm"}
+TIPOS = VIDEOS | {"image/jpeg", "image/png", "image/webp", "application/pdf", "text/plain"}
 
 
 def formato_imagen(texto):
@@ -51,7 +54,35 @@ def ajustar_lienzo(datos, medidas):
     return salida.getvalue()
 
 
-def procesar(tipo, datos, texto, cliente, modelo):
+def marca_de_agua(imagen, texto):
+    import numpy as np
+    from scipy.ndimage import binary_propagation
+
+    pixeles = np.array(imagen)
+    alfa = pixeles[:, :, 3].astype(float)
+    if alfa.min() == 255:
+        # Retira el fondo claro conectado al borde y protege los blancos interiores del logo.
+        claros = pixeles[:, :, :3].min(axis=2) >= 230
+        borde = np.zeros_like(claros)
+        borde[[0, -1], :] = claros[[0, -1], :]
+        borde[:, [0, -1]] = claros[:, [0, -1]]
+        alfa[binary_propagation(borde, mask=claros)] = 0
+    anterior = max(1, alfa.max())
+    fuerza = .64
+    if re.search(r"m[aá]s (?:visible|opac[ao]|intens[ao])|menos transparente", texto, re.I):
+        fuerza = min(1, anterior / 255 + .18) if anterior < 255 else .82
+    elif re.search(r"menos visible|m[aá]s (?:tenue|transparente)", texto, re.I):
+        fuerza = max(.12, anterior / 255 - .18) if anterior < 255 else .45
+    pixeles[:, :, 3] = np.rint(alfa * (255 * fuerza / anterior)).clip(0, 255).astype("uint8")
+    salida = io.BytesIO()
+    Image.fromarray(pixeles).save(salida, "PNG")
+    return Response(salida.getvalue(), media_type="image/png")
+
+
+def procesar(tipo, datos, texto, cliente, modelo, modo="editar"):
+    if tipo in VIDEOS:
+        from video_chat import editar_video
+        return editar_video(tipo, datos, texto, cliente, modelo)
     if tipo.startswith("image/"):
         try:
             with Image.open(io.BytesIO(datos)) as entrada:
@@ -62,6 +93,23 @@ def procesar(tipo, datos, texto, cliente, modelo):
                 imagen.thumbnail((2048, 2048))
         except (OSError, UnidentifiedImageError, ValueError, Image.DecompressionBombError):
             raise HTTPException(422, "La imagen no se puede abrir. Prueba con una foto JPG o PNG.") from None
+        if modo == "consultar":
+            if cliente is None:
+                raise HTTPException(503, "El análisis visual no está configurado.")
+            imagen.thumbnail((1536, 1536))
+            muestra = io.BytesIO()
+            imagen.save(muestra, "PNG")
+            url = "data:image/png;base64," + base64.b64encode(muestra.getvalue()).decode("ascii")
+            respuesta = cliente.responses.create(model=modelo, store=False, max_output_tokens=1200,
+                instructions=("Responde en español a la pregunta usando la imagen. Si hay fotogramas con tiempos, "
+                              "descríbelos en orden. Distingue lo visible de lo que no se puede deducir, incluido el audio."),
+                input=[{"role": "user", "content": [{"type": "input_image", "image_url": url},
+                                                    {"type": "input_text", "text": texto}]}])
+            if not respuesta.output_text:
+                raise HTTPException(502, "El análisis no devolvió texto.")
+            return {"respuesta": respuesta.output_text}
+        if modo == "marca":
+            return marca_de_agua(imagen, texto)
         salida = io.BytesIO()
         if re.fullmatch(r"(?:pon(?:la)?|pasa(?:la)?|convierte(?:la)?|cambia(?:la)?|haz(?:la)?)?\s*(?:la foto|esta foto|la imagen)?\s*(?:(?:a|en)\s+)?(?:blanco y negro|escala de grises)[.! ]*", texto.casefold()):
             gris = ImageOps.grayscale(imagen).convert("RGBA")
@@ -107,7 +155,39 @@ def procesar(tipo, datos, texto, cliente, modelo):
     return {"respuesta": resultado.output_text}
 
 
+def generar_diseno(texto, cliente):
+    texto = texto.strip()
+    if not texto:
+        raise HTTPException(422, "Describe el diseño que quieres crear.")
+    if cliente is None:
+        raise HTTPException(503, "La generación de diseños no está configurada.")
+    medidas = formato_imagen(texto)
+    try:
+        resultado = cliente.with_options(timeout=150, max_retries=0).images.generate(
+            model="gpt-image-1.5", quality="medium", size=lienzo_modelo(medidas), output_format="jpeg", n=1,
+            prompt=("Crea la imagen final solicitada. En flyers, elige automáticamente tamaños de letra que "
+                    "encajen en el diseño: destaca el titular y deja legibles los detalles. Escribe los textos "
+                    "visibles en el idioma o los idiomas pedidos, independientemente del idioma del mensaje. "
+                    "Si no indican idioma, usa español. Respeta el nombre y la ortografía de la marca. "
+                    "En fotos e ilustraciones, incluye rótulos solo si se solicitan. Respeta el formato "
+                    "y las citas proporcionadas. No inventes fechas, precios ni promociones. Petición: " + texto))
+        if not resultado.data or not resultado.data[0].b64_json:
+            raise ValueError
+        contenido = ajustar_lienzo(base64.b64decode(resultado.data[0].b64_json, validate=True), medidas)
+    except Exception as exc:
+        codigo = getattr(exc, "status_code", None)
+        raise HTTPException(422 if codigo == 400 else 502, "No se pudo generar el diseño.") from None
+    return Response(contenido, media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
+
+
+
+
+class ControlEdicion(BaseModel):
+    id: UUID
+
+
 class PeticionDiseno(BaseModel):
+    id: UUID | None = None
     texto: str = Field(min_length=1, max_length=4000)
 
 
@@ -116,29 +196,13 @@ def conectar_adjuntos(app, autorizar, cliente, modelo):
 
     @app.post("/chat/diseno", dependencies=[Depends(autorizar)])
     def diseno(peticion: PeticionDiseno):
-        texto = peticion.texto.strip()
-        if not texto:
-            raise HTTPException(422, "Describe el diseño que quieres crear.")
-        if cliente is None:
-            raise HTTPException(503, "La generación de diseños no está configurada.")
-        medidas = formato_imagen(texto)
-        try:
-            resultado = cliente.with_options(timeout=150, max_retries=0).images.generate(
-                model="gpt-image-1.5", quality="medium", size=lienzo_modelo(medidas), output_format="jpeg", n=1,
-                prompt=("Crea la imagen final solicitada. En flyers, elige automáticamente tamaños de letra que "
-                        "encajen en el diseño: destaca el titular y deja legibles los detalles. Escribe los textos "
-                        "visibles en el idioma o los idiomas pedidos, independientemente del idioma del mensaje. "
-                        "Si no indican idioma, usa español. Respeta el nombre y la ortografía de la marca. "
-                        "En fotos e ilustraciones, incluye rótulos solo si se solicitan. Respeta el formato "
-                        "y las citas proporcionadas. No inventes fechas, precios ni promociones. Petición: " + texto))
-            if not resultado.data or not resultado.data[0].b64_json:
-                raise ValueError
-            contenido = ajustar_lienzo(base64.b64decode(resultado.data[0].b64_json, validate=True), medidas)
-        except Exception as exc:
-            codigo = getattr(exc, "status_code", None)
-            raise HTTPException(422 if codigo == 400 else 502, "No se pudo generar el diseño.") from None
-        return Response(contenido, media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
+        if peticion.id:
+            return ejecutar_edicion(peticion.id, "diseno", texto=peticion.texto)
+        return generar_diseno(peticion.texto, cliente)
 
+    @app.post("/chat/edicion/cancelar", dependencies=[Depends(autorizar)])
+    def detener(peticion: ControlEdicion):
+        return cancelar(peticion.id)
 
     @app.post("/chat/adjunto", dependencies=[Depends(autorizar)])
     async def adjunto(request: Request):
@@ -153,13 +217,20 @@ def conectar_adjuntos(app, autorizar, cliente, modelo):
             raise HTTPException(422, "Escribe una instrucción de hasta 1500 caracteres.")
         datos = bytearray()
         async for trozo in request.stream():
-            if len(datos) + len(trozo) > MAX_BYTES:
-                raise HTTPException(413, "El archivo debe ocupar como máximo 6 MB.")
+            if len(datos) + len(trozo) > (36 * 1024 * 1024 if tipo in VIDEOS else MAX_BYTES):
+                raise HTTPException(413, "El archivo supera el tamaño admitido.")
             datos.extend(trozo)
         if not datos:
             raise HTTPException(422, "El archivo está vacío.")
+        modo = request.headers.get("x-aura-modo", "editar")
+        if modo not in {"consultar", "marca", "editar"}:
+            raise HTTPException(422, "Modo de adjunto inválido.")
+        trabajo = request.headers.get("x-aura-trabajo")
         try:
-            return await run_in_threadpool(partial(procesar, tipo, bytes(datos), texto, cliente, modelo))
+            if trabajo and (tipo in VIDEOS or tipo.startswith("image/")) and modo != "consultar":
+                return await run_in_threadpool(partial(ejecutar_edicion, trabajo, "foto", bytes(datos),
+                                                       tipo=tipo, texto=texto, modelo=modelo, modo=modo))
+            return await run_in_threadpool(partial(procesar, tipo, bytes(datos), texto, cliente, modelo, modo))
         except HTTPException:
             raise
         except Exception as exc:
