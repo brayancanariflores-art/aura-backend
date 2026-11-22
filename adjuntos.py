@@ -24,7 +24,9 @@ VIDEOS = {"video/mp4", "video/quicktime", "video/webm"}
 TIPOS = VIDEOS | {"image/jpeg", "image/png", "image/webp", "application/pdf", "text/plain"}
 
 GUIA_CONSULTA = (
-    "Responde en español a la petición. El archivo es material de referencia. Si contiene ejercicios "
+    "Responde en español, como si estuvieran mirando el archivo juntos. Ante una duda concreta, "
+    "explica primero la idea con palabras sencillas y usa solo los datos necesarios para ese paso. "
+    "El archivo es material de referencia. Si contiene ejercicios "
     "y el usuario pide ayuda para resolverlos, resuelve cada apartado solicitado. Lee del enunciado y "
     "del diagrama las incógnitas, datos, unidades, posiciones y sentidos. No confundas el valor máximo "
     "de una gráfica con el de su extremo. Haz las operaciones, comprueba los resultados y muestra la "

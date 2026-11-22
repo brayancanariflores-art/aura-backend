@@ -140,11 +140,11 @@ def desarrollar_viga(viga, diagramas=None):
             decimales.append(rf"{simbolo}\approx {decimal}\,\mathrm{{{unidad}}}")
     nota = f"En la cara izquierda, V positivo apunta hacia {sentido_v} y M positivo es {sentido_m}."
     pasos = [
-        Paso(explicacion="Ubicamos los apoyos y el corte desde el extremo izquierdo.",
+        Paso(explicacion="Mide desde el extremo izquierdo para ubicar los dos apoyos y el punto C.",
              formula=rf"x_A={t(a)}\,\mathrm{{m}},\quad x_B={t(b)}\,\mathrm{{m}},\quad x_C={t(c)}\,\mathrm{{m}}"),
-        Paso(explicacion="Sumamos las cargas y tomamos momentos en A para hallar las reacciones.",
+        Paso(explicacion="Al tomar momentos alrededor de A, la fuerza del propio apoyo queda fuera de la cuenta porque actúa justo allí. Así encontramos la reacción en B y luego la de A.",
              formula=rf"W={t(f)}\,\mathrm{{kN}},\quad R_B=\frac{{{t(m-a*f-par)}}}{{{t(b-a)}}}={t(rb)}\,\mathrm{{kN}},\quad R_A=W-R_B={t(ra)}\,\mathrm{{kN}}"),
-        Paso(explicacion="Cortamos en C y equilibramos las fuerzas y los momentos del tramo izquierdo.",
+        Paso(explicacion="Imagina que cortas la viga en C. Al equilibrar el tramo izquierdo, encuentras las fuerzas y el momento que transmite el corte.",
              formula=rf"W_{{\mathrm{{izq}}}}={t(fc)}\,\mathrm{{kN}},\quad \sum F_x=0,\quad \sum F_y=0,\quad \sum M_C=0")
     ]
     return Desarrollo(pasos=pasos, exacto=exacto, aproximacion=r",\quad ".join(decimales), nota=nota, lectura=lectura)
