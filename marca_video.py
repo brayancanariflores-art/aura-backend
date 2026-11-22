@@ -12,6 +12,7 @@ from bisect import bisect_right
 
 from PIL import Image, ImageDraw, ImageOps
 
+from tamano_marca import escala_marca
 from estudio_medios import ejecutar, entrada_video, ffmpeg, inspeccionar
 
 
@@ -231,7 +232,7 @@ def preparar_placa(logo):
     return placa
 
 
-def sustitucion(clip, logo, archivo, grupos, tam, silenciar=False, *, impreso=False, curva=False):
+def sustitucion(clip, logo, archivo, grupos, tam, silenciar=False, *, impreso=False, curva=False, escala=1.):
     # Una capa transparente en coordenadas del original. El reloj de la pista de video
     # original determina los fotogramas de salida, incluso para clips de tasa variable.
     ancho, alto = tam
@@ -298,7 +299,7 @@ def sustitucion(clip, logo, archivo, grupos, tam, silenciar=False, *, impreso=Fa
                 if impreso:
                     registro = registros[indice]
                     estado = registro.en(t) if registro is not None else None
-                    sello, posicion = imprimir(superficie, caja, arte, vistas[indice], curva, estado)
+                    sello, posicion = imprimir(superficie, caja, arte, vistas[indice], curva, estado, escala)
                 else:
                     sello = arte.resize(caja[2:], Image.Resampling.LANCZOS)
                     posicion = caja[:2]
@@ -339,19 +340,22 @@ def editar_marca(carpeta, texto, cliente, modelo):
                       "-c:v","mjpeg","-f","image2pipe","pipe:1"],salida=True,tiempo=20)
     with Image.open(io.BytesIO(prueba)) as im:
         w,h = im.size
-    grupos = trayectoria_guiada(texto, w, h, info["duracion"])
+    ruta_trayectoria = carpeta / "trayectoria-marca.json"
+    grupos = (json.loads(ruta_trayectoria.read_text()) if ruta_trayectoria.is_file()
+              else trayectoria_guiada(texto, w, h, info["duracion"]))
     if grupos is None and re.search(r"\b(?:al|el|hacia el|sobre el)\s+final\b", texto, re.I) and not re.search(r"\b(?:desde|a partir de)\b",texto,re.I):
         from seguimiento_marca import buscar_al_final
         grupos = buscar_al_final(clip, texto, cliente, modelo, info["duracion"], (w,h))
     if grupos is None:
         cajas, fps, total = localizar(clip, texto, cliente, modelo, info["duracion"])
         grupos = validar_cajas(cajas, fps, total, w, h, info["duracion"])
+    ruta_trayectoria.write_text(json.dumps(grupos))
     archivo = carpeta / "editado.mp4"
     silenciar = any(palabra in texto.lower() for palabra in ("sin audio", "quita el audio", "elimina el audio", "sin sonido"))
     from tinta_video import acabado_impreso
     curva = bool(re.search(r"\b(?:vaso|copa|botella|taza|lata|cilindro)\b", texto, re.I))
     sustitucion(clip, carpeta/"marca.png", archivo, grupos, (w,h), silenciar,
-                impreso=acabado_impreso(texto), curva=curva)
+                impreso=acabado_impreso(texto), curva=curva, escala=escala_marca(texto))
     if not silenciar:
         info_salida = subprocess.run([ffmpeg(), "-hide_banner", *entrada_video(archivo)], capture_output=True, timeout=10)
         if b"Audio:" in info_salida.stderr:
