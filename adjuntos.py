@@ -2,6 +2,7 @@
 import base64
 import binascii
 import io
+import os
 import re
 from functools import partial
 
@@ -53,11 +54,17 @@ def consultar_adjunto(cliente, modelo, contenido, texto):
     solo_lectura = re.search(r"\b(?:pistas?|traduce|transcribe|qu[eé] dice|sin (?:resolver|dar\w* (?:la|el) (?:resultado|respuesta))|"
                              r"no (?:me )?(?:lo resuelvas|resuelvas|digas|des|desveles))\b", peticion, re.I)
     if resolver and not solo_lectura:
-        respuesta = cliente.responses.parse(model=modelo, store=False, max_output_tokens=5600,
+        modelo_ejercicios = os.environ.get("AURA_MODELO_EJERCICIOS", "gpt-5.4")
+        opciones = {"reasoning": {"effort": "medium"}} if modelo_ejercicios.startswith("gpt-5") else {}
+        respuesta = cliente.responses.parse(model=modelo_ejercicios, store=False, max_output_tokens=10000, **opciones,
             instructions=GUIA_CONSULTA + " Incluye un elemento por cada ejercicio solicitado. En el campo de "
             "resultado escribe todos los valores o la solución simbólica, no instrucciones para obtenerlos. "
             "Para una viga compatible transcribe independientemente las cotas impresas, posiciones de apoyos, "
-            "cargas y corte en viga. Usa los índices de las marcas de izquierda a derecha empezando en 0. "
+            "cargas y corte en viga. Primero lee por separado TODAS las cotas de ese dibujo de izquierda a "
+            "derecha; verifica que su suma coincide con la longitud, sin reutilizar cotas de otro ejercicio. "
+            "Ubica los apoyos por sus símbolos y la sección por el punto señalado con C. Los índices de las "
+            "marcas empiezan en 0; el extremo derecho es el índice igual al número de tramos. Cuenta cada "
+            "intervalo de carga una sola vez y comprueba que sus límites y alturas coinciden con la figura. "
             "Un extremo libre no es un apoyo. No incluyas reacciones en las cargas externas. Cuando rellenes viga, "
             "deja vacíos los campos cálculo, resultado y comprobación: el servidor los calcula a partir del dibujo. "
             "Una consulta anterior sirve para identificar la referencia; responde a la pregunta actual. "
