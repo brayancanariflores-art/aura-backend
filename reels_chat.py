@@ -24,6 +24,8 @@ from marca_video import editar_marca
 from tamano_marca import solo_tamano
 from ajustes_marca import AjusteNoAplicado, pide_posicion, pide_limpieza
 from texto_logo import cambio_de_leyenda
+from registro_superficie import ARCHIVO_REGISTRO
+from campanas_web import crear_campana, pide_campana
 
 
 class PedidoReel(BaseModel):
@@ -32,6 +34,7 @@ class PedidoReel(BaseModel):
     referencia: str | None = Field(default=None, max_length=700000)
     video_con_audio: str | None = Field(default=None, max_length=22369624)
     marca_original: str | None = Field(default=None, max_length=1400000)
+    logo_campana: str | None = Field(default=None, max_length=1400000)
     anterior: UUID | None = None
 
 
@@ -54,6 +57,13 @@ def formato_del_pedido(texto):
 def preparar_reel(carpeta, texto, cliente, modelo):
     if (carpeta / "marca.png").is_file():
         return editar_marca(carpeta, texto, cliente, modelo)
+    if (carpeta / "campana.json").is_file() or ((carpeta / "logo-campana.png").is_file() or pide_campana(texto)) and not any((carpeta / nombre).is_file() for nombre in ("referencia.jpg","entrada.mp4","anterior.json")):
+        def avisar(etapa, hechos, total):
+            tmp=carpeta / "progreso.tmp"
+            tmp.write_text(json.dumps({"etapa":etapa,"hechos":hechos,"total":total}))
+            tmp.replace(carpeta / "progreso.json")
+        formato = "cuadrado" if re.search(r"cuadrad[oa]|1:1",texto,re.I) else formato_del_pedido(texto)
+        return crear_campana(carpeta,texto,cliente,modelo,formato,avisar)
     referencia = carpeta / "referencia.jpg"
     anterior = carpeta / "anterior.json"
     previo = json.loads(anterior.read_text()) if anterior.exists() else None
@@ -216,9 +226,9 @@ def conectar_reels(app, autorizar, cliente, modelo):
             conservar = {"pedido", "listo.mp4", "error", "aviso-edicion"}
             completado = (carpeta / "listo.mp4").is_file()
             if completado:
-                conservar.update({"version.json", "escenas.jpg", "audio-original.m4a"})
+                conservar.update({"version.json", "escenas.jpg", "audio-original.m4a", "campana.json", "logo-campana.png"})
                 if (carpeta / "marca.png").is_file():
-                    conservar.update({"marca.png", "entrada.mp4", "instruccion-marca", "pista-conservada", "trayectoria-marca.json", "ajuste-superficie.json", "logo-editado.png"})
+                    conservar.update({"marca.png", "entrada.mp4", "instruccion-marca", "pista-conservada", "trayectoria-marca.json", "ajuste-superficie.json", "logo-editado.png", ARCHIVO_REGISTRO})
             for ruta in carpeta.iterdir():
                 cache_voz = completado and re.fullmatch(r"voz-[0-9a-f]{64}\.pcm", ruta.name)
                 if ruta.name not in conservar and not cache_voz:
@@ -226,7 +236,7 @@ def conectar_reels(app, autorizar, cliente, modelo):
 
     @app.post("/chat/reel", dependencies=[Depends(autorizar)], status_code=202)
     def crear(pedido: PedidoReel, tareas: BackgroundTasks):
-        if not cliente:
+        if not cliente and not (pide_campana(pedido.texto) or pedido.logo_campana or pedido.anterior and (raiz / str(pedido.anterior) / "campana.json").is_file()):
             raise HTTPException(503, "Configura el generador de AURA.")
         texto = pedido.texto.strip()
         if not texto:
@@ -248,6 +258,18 @@ def conectar_reels(app, autorizar, cliente, modelo):
                     im.load()
             except (OSError, ValueError, Image.DecompressionBombError):
                 raise HTTPException(422, "No pude leer los fotogramas de referencia.") from None
+        logo_campana = b""
+        if pedido.logo_campana is not None:
+            if pedido.anterior or pedido.video_con_audio or pedido.marca_original or pedido.referencia:
+                raise HTTPException(422, "Adjunta un solo logo para esta campaña.")
+            try:
+                logo_campana = base64.b64decode(pedido.logo_campana, validate=True)
+                with Image.open(io.BytesIO(logo_campana), formats=["PNG", "JPEG", "WEBP"]) as im:
+                    if max(im.size)>2048:
+                        raise ValueError
+                    im.load()
+            except (OSError, ValueError, Image.DecompressionBombError):
+                raise HTTPException(422, "No pude abrir el logo de la campaña.") from None
         marca = b""
         if pedido.marca_original is not None:
             if not pedido.video_con_audio or pedido.referencia or pedido.anterior:
@@ -270,7 +292,7 @@ def conectar_reels(app, autorizar, cliente, modelo):
                     raise ValueError
             except ValueError:
                 raise HTTPException(422, "Usa un video de hasta 16 MiB.") from None
-        huella = hashlib.sha256(texto.encode() + (datos or b"") + marca + video + str(pedido.anterior or "").encode()).hexdigest()
+        huella = hashlib.sha256(texto.encode() + (datos or b"") + marca + video + logo_campana + str(pedido.anterior or "").encode()).hexdigest()
         with (raiz / ".cola").open("a") as bloqueo:
             fcntl.flock(bloqueo, fcntl.LOCK_EX)
             activos = 0
@@ -293,10 +315,13 @@ def conectar_reels(app, autorizar, cliente, modelo):
             else:
                 padre = raiz / str(pedido.anterior)
                 previa_marca = pedido.anterior and all((padre / n).is_file() for n in ("listo.mp4", "marca.png", "entrada.mp4", "instruccion-marca"))
-                if pedido.anterior and not previa_marca and not all((padre / n).is_file() for n in ("listo.mp4", "version.json", "escenas.jpg")):
+                previa_campana = pedido.anterior and all((padre / n).is_file() for n in ("listo.mp4","campana.json"))
+                if pedido.anterior and not previa_marca and not previa_campana and not all((padre / n).is_file() for n in ("listo.mp4", "version.json", "escenas.jpg")):
                     raise HTTPException(410, "La versión anterior caducó. Adjunta el reel para continuar.")
                 carpeta.mkdir(mode=0o700)
                 try:
+                    if logo_campana:
+                        (carpeta / "logo-campana.png").write_bytes(logo_campana)
                     if video:
                         (carpeta / "entrada.mp4").write_bytes(video)
                     if datos:
@@ -306,7 +331,9 @@ def conectar_reels(app, autorizar, cliente, modelo):
                         (carpeta / "instruccion-marca").write_text(texto)
                     if previa_marca:
                         for nombre in ("marca.png", "entrada.mp4"):
-                            shutil.copyfile(padre / nombre, carpeta / nombre)
+                            os.link(padre / nombre, carpeta / nombre)
+                        if (padre / ARCHIVO_REGISTRO).is_file():
+                            os.link(padre / ARCHIVO_REGISTRO, carpeta / ARCHIVO_REGISTRO)
                         os.link(padre / "listo.mp4", carpeta / "revision-anterior.mp4")
                         for opcion in ("ajuste-superficie.json", "logo-editado.png"):
                             if (padre / opcion).is_file():
@@ -316,6 +343,11 @@ def conectar_reels(app, autorizar, cliente, modelo):
                             shutil.copyfile(trayectoria, carpeta / trayectoria.name)
                         texto = (padre / "instruccion-marca").read_text()[:4000] + "\nAjuste solicitado: " + texto
                         (carpeta / "instruccion-marca").write_text(texto[-8000:])
+                    elif previa_campana:
+                        shutil.copyfile(padre / "campana.json", carpeta / "campana.json")
+                        if (padre / "logo-campana.png").is_file():
+                            os.link(padre / "logo-campana.png", carpeta / "logo-campana.png")
+                        os.link(padre / "listo.mp4", carpeta / "revision-anterior.mp4")
                     elif pedido.anterior:
                         if (padre / "audio-original.m4a").is_file():
                             shutil.copyfile(padre / "audio-original.m4a", carpeta / "audio-original.m4a")
@@ -343,11 +375,21 @@ def conectar_reels(app, autorizar, cliente, modelo):
             tipo = "original" if (carpeta / "audio-original.m4a").is_file() else "sintetica"
             if (carpeta / "marca.png").is_file():
                 tipo = "original" if (carpeta / "pista-conservada").is_file() else "sin_audio"
-            return FileResponse(carpeta / "listo.mp4", media_type="video/mp4", headers={**privado, "X-Aura-Audio": tipo})
+            headers = {**privado, "X-Aura-Audio": tipo}
+            if (carpeta / "campana.json").is_file():
+                ficha = json.loads((carpeta / "campana.json").read_text())
+                headers["X-Aura-Campana"] = ficha["tipo"]
+                headers["X-Aura-Audio"] = "sin_audio" if ficha["silencio"] else "banda_sonora"
+            return FileResponse(carpeta / "listo.mp4", media_type="video/mp4", headers=headers)
         if (carpeta / "error").exists() or time.time() - carpeta.stat().st_mtime > 600:
             fallo = carpeta / "error"
             if fallo.is_file() and fallo.read_text().strip():
                 headers = {"X-Aura-Edicion": "ajuste-no-aplicado"} if (carpeta/"aviso-edicion").exists() else None
                 raise HTTPException(422, fallo.read_text(), headers=headers)
             raise HTTPException(502, "No se pudo completar el reel.")
-        return JSONResponse({"estado": "preparando"}, status_code=202, headers=privado)
+        avance = {"estado": "preparando"}
+        try:
+            avance.update(json.loads((carpeta / "progreso.json").read_text()))
+        except FileNotFoundError:
+            pass
+        return JSONResponse(avance, status_code=202, headers=privado)

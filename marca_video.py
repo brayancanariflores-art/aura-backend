@@ -233,7 +233,7 @@ def preparar_placa(logo):
     return placa
 
 
-def sustitucion(clip, logo, archivo, grupos, tam, silenciar=False, *, impreso=False, curva=False, escala=1., posicion=(0., 0.), limpiar=False):
+def sustitucion(clip, logo, archivo, grupos, tam, silenciar=False, *, impreso=False, curva=False, escala=1., posicion=(0., 0.), limpiar=False, progreso=None):
     # Una capa transparente en coordenadas del original. El reloj de la pista de video
     # original determina los fotogramas de salida, incluso para clips de tasa variable.
     ancho, alto = tam
@@ -265,8 +265,8 @@ def sustitucion(clip, logo, archivo, grupos, tam, silenciar=False, *, impreso=Fa
                     texturas[indice]=muestra_de_textura(foto,(x,y,w,h))
         registros = [None]*len(grupos)
         if curva:
-            from registro_superficie import preparar_registros
-            registros = preparar_registros(clip, grupos, (origen_x,origen_y,*size))
+            from registro_superficie import registros_del_clip
+            registros = registros_del_clip(clip, grupos, (origen_x,origen_y,*size))
             log.info("Registro óptico de la impresión en %s de %s tramos", sum(r is not None for r in registros), len(grupos))
         # Registrar en el recorte habitual. Ampliar solo la ventana de composición
         # para que el nuevo dibujo y las muestras limpias quepan tras desplazarlo.
@@ -293,6 +293,8 @@ def sustitucion(clip, logo, archivo, grupos, tam, silenciar=False, *, impreso=Fa
     vacio = Image.new("RGBA", size)
     try:
         fotogramas = math.ceil((final-inicio)*fps-1e-7)
+        if progreso:
+            progreso("componiendo", 0, fotogramas)
         if impreso:
             primer = round(inicio*fps)
             filtro = (f"fps={fps},crop={size[0]}:{size[1]}:{origen_x}:{origen_y}:exact=1,"
@@ -333,11 +335,15 @@ def sustitucion(clip, logo, archivo, grupos, tam, silenciar=False, *, impreso=Fa
                 lienzo.paste(sello, esquina)
                 break
             proc.stdin.write(lienzo.tobytes())
+            if progreso and (frame+1) % fps == 0:
+                progreso("componiendo", frame+1, fotogramas)
         proc.stdin.close()
         if lector is not None and lector.wait(timeout=25):
             raise ValueError("Error al leer los fotogramas del video.")
         if proc.wait(timeout=40):
             raise ValueError("Error creando la capa de la marca.")
+        if progreso:
+            progreso("exportando", fotogramas, fotogramas)
         ejecutar(["-y","-v","error",*entrada_video(clip),"-itsoffset",f"{inicio:.8f}","-i",str(capa),
                   "-filter_complex",f"[0:v:0][1:v:0]overlay={origen_x}:{origen_y}:eof_action=pass:repeatlast=0:enable='between(t,{inicio:.8f},{final:.8f})'[v]",
                   "-map","[v]",*([] if silenciar else ["-map","0:a:0?"]),"-c:v","libx264","-threads","2","-crf","17","-preset","veryfast",
@@ -390,9 +396,14 @@ def editar_marca(carpeta, texto, cliente, modelo):
     plan = planificar(clip, grupos, (w,h), orden, anterior, cliente, modelo) if impreso else {}
     from texto_logo import preparar_leyenda
     logo = preparar_leyenda(carpeta, orden, cliente, modelo)
+    def informar(etapa, hechos, total):
+        temporal = carpeta / "progreso.tmp"
+        temporal.write_text(json.dumps({"etapa": etapa, "hechos": hechos, "total": total}))
+        temporal.replace(carpeta / "progreso.json")
+
     sustitucion(clip, logo, archivo, grupos, (w,h), silenciar,
                 impreso=impreso, curva=curva, escala=escala_marca(texto),
-                posicion=plan.get('posicion',(0.,0.)), limpiar=plan.get('limpiar',False))
+                posicion=plan.get('posicion',(0.,0.)), limpiar=plan.get('limpiar',False), progreso=informar)
     plan_path.write_text(json.dumps(plan))
     if not silenciar:
         info_salida = subprocess.run([ffmpeg(), "-hide_banner", *entrada_video(archivo)], capture_output=True, timeout=10)
