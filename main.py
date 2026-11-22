@@ -63,6 +63,9 @@ ai_client = OpenAI(api_key=api_key, timeout=30.0, max_retries=1) if api_key else
 if ai_client is None:
     logger.warning("OPENAI_API_KEY no esta configurada")
 
+from voz_web import voice_routes
+app.include_router(voice_routes(autorizar, lambda: ai_client))
+
 client_db = chromadb.PersistentClient(path=os.path.join(DATA_DIR, "chroma_db"))
 collection = client_db.get_or_create_collection("Aura_Knowledge_Base")
 
