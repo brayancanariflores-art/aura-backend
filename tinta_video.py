@@ -235,6 +235,32 @@ def reconstruir(foto, mascara, alto, afinidad, limite):
     return np.clip(fondo+.52*np.clip(grano, -.08, .08), 0, 1)
 
 
+def desenfoque_borde(fotograma, forma):
+    """Medir la transición de luz cerca del borde físico del recipiente."""
+    centro, radio, cima, pendiente = forma
+    xs = centro + radio*np.linspace(-.6, .6, 31)
+    margen = max(7, min(19, round(radio*.15)))
+    ys = cima + pendiente*(xs-centro) + np.arange(-margen, margen+1)[:, None]
+    if xs.min()<0 or xs.max()>=fotograma.width-1 or ys.min()<0 or ys.max()>=fotograma.height-1:
+        return 0.
+    # Leer una franja estrecha del cuadro fuente, incluso cuando el recorte
+    # de la tinta sólo contiene el extremo visible del diseño.
+    fila = int(ys.min())
+    gris = np.asarray(fotograma.crop((0, fila, fotograma.width, math.ceil(ys.max())+1)).convert("L"), dtype=np.float32)
+    perfil = ndimage.map_coordinates(gris, [ys-fila, np.broadcast_to(xs, ys.shape)], order=1)
+    inicio = np.median(perfil[:3], axis=0)
+    contraste = np.percentile(perfil[-4:], 75, axis=0)-inicio
+    niveles = (perfil-inicio)/np.maximum(1, contraste)
+    izq, medio, der = [(niveles > umbral).argmax(axis=0) for umbral in (.15, .5, .85)]
+    buenos = (contraste>45) & (abs(medio-margen)<margen*.6) & (izq<=medio) & (medio<der)
+    if buenos.sum()<12:
+        return 0.
+    # El ancho del 15 al 85 % equivale a 2,07 sigmas de un borde gaussiano.
+    # Descontar la transición natural del borde y el remuestreo del video.
+    sigma = np.median((der-izq)[buenos])/2.07
+    return min(4.5, .88*math.sqrt(max(0., sigma*sigma-1.8**2)))
+
+
 def imprimir(fotograma, caja, arte, vista, curva, estado=None, escala=1.):
     x, y, w, h = caja
     margen = max(6, round(max(w,h)*(.44 if estado is not None else .34)))
@@ -293,6 +319,8 @@ def imprimir(fotograma, caja, arte, vista, curva, estado=None, escala=1.):
     tinta = estampado[:,:,:3]*(.73+.38*luz[:,:,None])
     alfa = estampado[:,:,3]*densidad
     suave = max(.50, min(1.25, alto/270))
+    if estado is not None:
+        suave = max(suave, desenfoque_borde(fotograma, estado[0])*min(fx, fy))
     alfa = ndimage.gaussian_filter(alfa, suave)
     color = ndimage.gaussian_filter(tinta*densidad[:,:,None], (suave,suave,0))
     resultado = base*(1-alfa[:,:,None]) + color
