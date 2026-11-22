@@ -3,10 +3,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 from tamano_marca import escala_marca, solo_tamano
-from tinta_video import acabado_impreso, coordenadas_arte, imprimir, preparar_tinta
+from tinta_video import acabado_impreso, coordenadas_arte, desenfoque_borde, imprimir, preparar_tinta
 
 
 class TintaVideoTest(unittest.TestCase):
@@ -46,6 +46,14 @@ class TintaVideoTest(unittest.TestCase):
         np.testing.assert_allclose(d-c+1, 1.35*(b-a+1), atol=2)
         np.testing.assert_allclose((a+b)/2, (c+d)/2, atol=.5)
         np.testing.assert_array_equal(render(1, tinta*0), render(1.35, tinta*0))
+
+    def test_la_impresion_comparte_el_foco_del_vidrio(self):
+        vidrio = Image.new("L", (220, 180), 25)
+        ImageDraw.Draw(vidrio).rectangle((35, 45, 185, 70), fill=238)
+        forma = (110, 75, 45, 0.)
+        self.assertEqual(desenfoque_borde(vidrio, forma), 0.)
+        self.assertGreater(desenfoque_borde(vidrio.filter(ImageFilter.GaussianBlur(4)), forma), 2.)
+        self.assertEqual(desenfoque_borde(vidrio, (10, 15, 1, .1)), 0.)
 
     def test_el_papel_claro_deja_ver_el_vidrio(self):
         with TemporaryDirectory() as carpeta:
