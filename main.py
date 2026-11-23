@@ -20,7 +20,7 @@ from html import unescape
 import chromadb
 import uvicorn
 from fastapi import FastAPI, HTTPException, Depends
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from starlette.background import BackgroundTask
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from openai import (
@@ -2288,6 +2288,7 @@ def comando_tareas(pregunta):
 
 
 class PeticionChat(BaseModel):
+    progresivo: bool = False
     texto: str = Field(min_length=1, max_length=10000)
     zona_horaria: str | None = Field(default=None, max_length=100)
 
@@ -3807,6 +3808,29 @@ def capacidades_evolucion(_auth=Depends(autorizar)):
             'acciones_permitidas_tras_aprobacion': ['crear_tarea'],
             'auto_despliegue': False, 'auto_modificacion_de_codigo': False}
 
+def generar_flujo_chat(opciones, finalizar_turno, pregunta):
+    def linea(evento):
+        return json.dumps(evento, ensure_ascii=False) + "\n"
+
+    try:
+        with ai_client.chat.completions.stream(**opciones) as flujo:
+            for evento in flujo:
+                if evento.type == "content.delta" and evento.delta:
+                    yield linea({"delta": evento.delta})
+            choice = flujo.get_final_completion().choices[0]
+            if not choice.finish_reason:
+                raise ValueError("El modelo no confirmó el final de la respuesta")
+        resultado = finalizar_turno(choice.message)
+        try:
+            yield linea(resultado)
+        finally:
+            guardar_memorias_automaticas(pregunta)
+        yield linea({"fin": True})
+    except Exception:
+        logger.exception("No se pudo completar el flujo del chat")
+        yield linea({"error": "Se interrumpió la respuesta de AURA."})
+
+
 @app.post("/chat")
 def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
     pregunta = peticion.texto.strip()
@@ -4030,57 +4054,60 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
                 "de decir. Si te piden redactar o citar una frase concreta, respeta ese pedido."})
         messages.append({"role": "user", "content": pregunta})
 
-        response = ai_client.chat.completions.create(
-            model=MODEL, messages=messages, tools=TOOLS,
-            tool_choice="auto"
-        )
-        response_message = response.choices[0].message
+        def finalizar_turno(response_message):
+            fuentes_consultadas = []
+            if response_message.tool_calls:
+                messages.append(response_message.model_dump(exclude_none=True))
+                for tool_call in response_message.tool_calls:
+                    if tool_call.function.name == "web_search":
+                        try:
+                            args = json.loads(tool_call.function.arguments)
+                            result = web_search(args.get("query", ""), ahora)
+                            resumen, separador, lista = result.rpartition(SECCION)
+                            if separador:
+                                fuentes_consultadas.extend(lista.splitlines())
+                                result = sin_citas(resumen)
+                        except (json.JSONDecodeError, TypeError, AttributeError):
+                            result = "Argumentos de busqueda no validos."
+                    else:
+                        result = "Herramienta no disponible."
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": result,
+                    })
+                second_response = ai_client.chat.completions.create(model=MODEL, messages=messages)
+                assistant_reply = second_response.choices[0].message.content
+            else:
+                assistant_reply = response_message.content
 
-        fuentes_consultadas = []
-        if response_message.tool_calls:
-            messages.append(response_message.model_dump(exclude_none=True))
-            for tool_call in response_message.tool_calls:
-                if tool_call.function.name == "web_search":
-                    try:
-                        args = json.loads(tool_call.function.arguments)
-                        result = web_search(args.get("query", ""), ahora)
-                        resumen, separador, lista = result.rpartition(SECCION)
-                        if separador:
-                            fuentes_consultadas.extend(lista.splitlines())
-                            result = sin_citas(resumen)
-                    except (json.JSONDecodeError, TypeError, AttributeError):
-                        result = "Argumentos de busqueda no validos."
-                else:
-                    result = "Herramienta no disponible."
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result,
-                })
-            second_response = ai_client.chat.completions.create(model=MODEL, messages=messages)
-            assistant_reply = second_response.choices[0].message.content
-        else:
-            assistant_reply = response_message.content
+            if not assistant_reply:
+                raise ValueError("OpenAI devolvio una respuesta vacia")
+            # Anexo determinista: no depender del modelo para enumerar todos los pendientes.
+            if analisis_proyecto:
+                assistant_reply += anexo_cobertura_tareas(
+                    proyecto_tareas, tareas_contexto,
+                    incluir_proyecto=not pide_mencionar_proyectos_una_vez(normal_pregunta),
+                )
+            guardar_en_historial("user", pregunta)
+            assistant_reply = sin_citas(assistant_reply) if fuentes_consultadas else assistant_reply
+            registro = assistant_reply
+            if fuentes_consultadas:
+                registro += SECCION + "\n".join(dict.fromkeys(fuentes_consultadas))
+            guardar_en_historial("assistant", registro)
+            return {"respuesta": assistant_reply}
 
-        if not assistant_reply:
-            raise ValueError("OpenAI devolvio una respuesta vacia")
-        # Anexo determinista: no depender del modelo para enumerar todos los pendientes.
-        if analisis_proyecto:
-            assistant_reply += anexo_cobertura_tareas(
-                proyecto_tareas, tareas_contexto,
-                incluir_proyecto=not pide_mencionar_proyectos_una_vez(normal_pregunta),
+        opciones = dict(model=MODEL, messages=messages, tools=TOOLS, tool_choice="auto")
+        if peticion.progresivo:
+            return StreamingResponse(
+                generar_flujo_chat(opciones, finalizar_turno, pregunta),
+                media_type="application/x-ndjson",
+                headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
             )
-        # El guardado automatico no debe impedir responder si falla.
-        guardados = guardar_memorias_automaticas(pregunta)
-        if guardados:
-            logger.info("Memorias automaticas guardadas: %d", len(guardados))
-        guardar_en_historial("user", pregunta)
-        assistant_reply = sin_citas(assistant_reply) if fuentes_consultadas else assistant_reply
-        registro = assistant_reply
-        if fuentes_consultadas:
-            registro += SECCION + "\n".join(dict.fromkeys(fuentes_consultadas))
-        guardar_en_historial("assistant", registro)
-        return {"respuesta": assistant_reply}
+        response = ai_client.chat.completions.create(**opciones)
+        resultado = finalizar_turno(response.choices[0].message)
+        guardar_memorias_automaticas(pregunta)
+        return resultado
 
     except AuthenticationError:
         logger.exception("Error de autenticacion con OpenAI")
