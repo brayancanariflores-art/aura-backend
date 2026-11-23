@@ -43,7 +43,10 @@ def fecha_larga(fecha):
 def contexto_fecha(ahora):
     hoy = ahora.date()
     return (f"Referencia de calendario ({ahora.tzinfo}): hoy es {fecha_larga(hoy)}; "
-            f"mañana será {fecha_larga(hoy + timedelta(days=1))}. ")
+            f"mañana será {fecha_larga(hoy + timedelta(days=1))}. "
+            "En el chat, cuando des una fecha concreta, escribe el nombre del día de la semana "
+            "si lo conoces, el día del mes en cifras y el mes en palabras. Si incluyes el año, "
+            "escríbelo en cifras. Aplica este formato también a los feriados. ")
 
 
 def respuesta_calendario(normal, ahora):
