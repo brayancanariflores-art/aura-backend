@@ -2,13 +2,32 @@
 import io
 import os
 import wave
+from contextlib import ExitStack
 
+import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 MAX_SECONDS = 90
 MAX_WAV = 44 + MAX_SECONDS * 16000 * 2
 NO_STORE = {"Cache-Control": "private, no-store"}
+
+
+class SpeechStream(StreamingResponse):
+    """Cierra la conexión del sintetizador incluso si el oyente se desconecta."""
+    def __init__(self, stream):
+        with ExitStack() as stack:
+            upstream = stack.enter_context(stream)
+            super().__init__(upstream.iter_bytes(chunk_size=4096), media_type="audio/pcm", headers=NO_STORE)
+            self.closer = stack.pop_all()
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with anyio.CancelScope(shield=True):
+                await run_in_threadpool(self.closer.close)
 
 
 async def read_limited(request, maximum):
@@ -73,12 +92,13 @@ def voice_routes(authorize, get_client):
         if not 0 < len(text) <= 3500:
             raise HTTPException(422, "Longitud de texto no válida.")
         speech = client().audio.speech
+        options = dict(model=os.getenv("AURA_TTS_MODEL", "gpt-4o-mini-tts"), voice="marin", input=text,
+                       instructions="Habla en español latinoamericano, con voz cálida y natural. Lee el texto tal como está.")
         try:
-            result = await run_in_threadpool(
-                speech.create, model=os.getenv("AURA_TTS_MODEL", "gpt-4o-mini-tts"),
-                voice="marin", input=text, response_format="mp3",
-                instructions="Habla en español latinoamericano, con voz cálida y natural. Lee el texto tal como está.",
-            )
+            if request.headers.get("accept") == "audio/pcm":
+                stream = speech.with_streaming_response.create(response_format="pcm", **options)
+                return await run_in_threadpool(SpeechStream, stream)
+            result = await run_in_threadpool(speech.create, response_format="mp3", **options)
         except Exception:
             raise HTTPException(502, "La voz no está disponible.") from None
         return Response(result.content, media_type="audio/mpeg", headers=NO_STORE)
