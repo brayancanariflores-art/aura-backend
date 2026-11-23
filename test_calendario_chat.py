@@ -18,6 +18,11 @@ class CalendarioChatTest(unittest.TestCase):
         self.assertEqual(respuesta_calendario("es lunes hoy", madrid), "Sí, hoy es lunes 23 de noviembre de 2026.")
         self.assertIn("hoy es domingo 22 de noviembre de 2026", contexto_fecha(nueva_york))
 
+    def test_fecha_de_manana_preguntada_por_voz_o_texto(self):
+        ahora = hora_del_chat("America/New_York", datetime.fromisoformat("2026-11-23T12:00:00+00:00"))
+        self.assertEqual(respuesta_calendario("manana que fecha estamos", ahora),
+                         "Mañana será martes 24 de noviembre de 2026.")
+
     def test_medianoche_fin_de_ano_bisiesto_y_cambio_de_hora(self):
         for instante, pregunta, esperado in [
             ("2026-11-23T05:00:00+00:00", "que fecha es hoy", "Hoy es lunes 23 de noviembre de 2026."),
