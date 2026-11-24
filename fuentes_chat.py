@@ -10,6 +10,17 @@ _URL = r"(?:https?://|www\.)[^\s<>()\[\]]+(?:\([^\s()]*\)[^\s<>()\[\]]*)*"
 _MARCA = re.compile(r"\[([^\]\n]*)\]\s*\(\s*(" + _URL + r")\s*\)", re.I)
 
 
+def pide_busqueda_directa(pregunta):
+    """Ataja pedidos inequívocos. El chat decide con contexto en los demás casos."""
+    return bool(re.match(
+        r"^[\s¿¡]*(?:(?:oye|aura|por favor)[\s,]+)*"
+        r"(?:(?:(?:b[uú]sca(?:me)?|(?:me )?(?:puedes|podr[ií]as) buscar(?:me)?)\s+"
+        r"(?:(?:en )?(?:internet|la web)|(?:las? |los? )?(?:[uú]ltimas? )?noticias?))"
+        r"|(?:[uú]ltimas noticias|noticias (?:de hoy|de ayer|de esta semana)))\b",
+        pregunta, re.IGNORECASE,
+    ))
+
+
 def pedido_fuentes(pregunta):
     """Devuelve si pide enlaces y si se refiere solo a la respuesta anterior."""
     texto = unicodedata.normalize("NFKD", pregunta.casefold())
