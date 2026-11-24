@@ -50,6 +50,8 @@ class Equilibrio(unittest.TestCase):
                      {"role": "assistant", "content": "Cada apoyo sostiene 5 kN."}]
         pregunta = "¿Me das el diagrama?"
         self.assertTrue(pide_dibujo_viga("me das el diagrama", historial))
+        self.assertTrue(pide_dibujo_viga("y el diagrama de esta ultima", historial))
+        self.assertFalse(pide_dibujo_viga("busca en internet el ultimo diagrama de vigas", historial))
         self.assertFalse(pide_dibujo_viga("cuanto sostiene cada apoyo", historial))
         cliente = Mock()
         pedido = PedidoViga(corresponde=True, viga=viga([2, 2], 0, 2, None, puntuales=[(1, 10)]),

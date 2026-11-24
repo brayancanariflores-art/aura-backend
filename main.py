@@ -3944,19 +3944,19 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
             guardar_en_historial("user", pregunta)
             guardar_en_historial("assistant", respuesta + (SECCION + fuentes if fuentes else ""))
             return {"respuesta": respuesta}
+        historial = cargar_historial_reciente(limite=10)
+        if not mostrar_fuentes and pide_dibujo_viga(normal_pregunta, historial):
+            resultado = responder_con_diagrama(ai_client, MODEL, historial, pregunta)
+            if resultado is not None:
+                guardar_en_historial("user", pregunta)
+                guardar_en_historial("assistant", resultado["respuesta"])
+                return resultado
         if requiere_web or mostrar_fuentes:
             respuesta_web = web_search(pregunta, ahora)
             guardar_en_historial("user", pregunta)
             guardar_en_historial("assistant", respuesta_web)
             return {"respuesta": respuesta_web if mostrar_fuentes else sin_citas(respuesta_web)}
 
-        historial = cargar_historial_reciente(limite=10)
-        if pide_dibujo_viga(normal_pregunta, historial):
-            resultado = responder_con_diagrama(ai_client, MODEL, historial, pregunta)
-            if resultado is not None:
-                guardar_en_historial("user", pregunta)
-                guardar_en_historial("assistant", resultado["respuesta"])
-                return resultado
         proyecto_actual, proyecto_ambiguo = resolver_referencia_proyecto(pregunta, historial)
         if proyecto_ambiguo:
             respuesta = ("Tengo varios proyectos registrados y no quiero confundirlos. "
