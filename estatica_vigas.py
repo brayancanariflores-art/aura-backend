@@ -2,7 +2,7 @@
 from fractions import Fraction
 from math import isfinite
 from soluciones import Desarrollo, Paso
-from diagramas_viga import dibujar_curvas, dibujar_viga
+from diagramas_viga import dibujar_curvas, dibujar_viga, numero as rotulo
 from pydantic import BaseModel, Field
 
 
@@ -27,7 +27,7 @@ class Viga(BaseModel):
     tramos_m: list[float] = Field(description="Distancias consecutivas entre marcas de la línea de cotas, de izquierda a derecha. El primer nodo es 0; nunca uses coordenadas acumuladas aquí.")
     apoyo_izquierdo: int = Field(description="Índice de nodo del apoyo A, no una distancia en metros.")
     apoyo_derecho: int = Field(description="Índice de nodo del apoyo B, no una distancia en metros.")
-    corte: int = Field(description="Índice del nodo señalado por el punto C, no su coordenada.")
+    corte: int | None = Field(description="Índice del nodo C solo si se pide un corte concreto. Para la viga completa o sus curvas usa null.")
     puntuales: list[CargaPuntual]
     pares: list[ParAplicado]
     distribuidas: list[CargaDistribuida] = Field(description="Un tramo por intervalo de intensidad lineal. Una carga triangular con vértice interior requiere dos tramos, uno creciente y uno decreciente.")
@@ -50,7 +50,7 @@ def medida(valor):
     return Fraction(str(valor))
 
 
-def desarrollar_viga(viga, diagramas=None):
+def desarrollar_viga(viga, diagramas=None, incluir_curvas=True):
     x = [Fraction(0)]
     for tramo in viga.tramos_m:
         if not isfinite(tramo) or tramo <= 0:
@@ -60,8 +60,9 @@ def desarrollar_viga(viga, diagramas=None):
         if not 0 <= indice < len(x):
             raise ValueError("posición")
         return x[indice]
-    a, b, c = map(posicion, (viga.apoyo_izquierdo, viga.apoyo_derecho, viga.corte))
-    if not a < b or not 0 < c < x[-1] or c in (a, b):
+    a, b = map(posicion, (viga.apoyo_izquierdo, viga.apoyo_derecho))
+    c = posicion(viga.corte) if viga.corte is not None else None
+    if not a < b or (c is not None and (not 0 < c < x[-1] or c in (a, b))):
         raise ValueError("posición de apoyos o corte")
 
     fuerzas = [(posicion(p.nodo), medida(p.fuerza_kN_hacia_abajo)) for p in viga.puntuales]
@@ -87,7 +88,6 @@ def desarrollar_viga(viga, diagramas=None):
     f, m, par = cargas(x[-1])
     rb = (m - a*f - par) / (b-a)
     ra = f - rb
-    fc, mc, pc = cargas(c)
     reacciones = [(a, ra), (b, rb)]
     def esfuerzos(limite, incluir_nodo):
         carga, primer_momento, par_local = cargas(limite, incluir_nodo)
@@ -95,18 +95,26 @@ def desarrollar_viga(viga, diagramas=None):
         v = sum(r for pos, r in apoyos) - carga
         m_local = sum((limite-pos)*r for pos, r in apoyos) - limite*carga + primer_momento - par_local
         return v, m_local
-    cortante, flector = esfuerzos(c, True)
-    derecha_v = (f-fc) - sum(r for pos, r in reacciones if pos > c)
-    derecha_m = sum((pos-c)*r for pos, r in reacciones if pos > c) - ((m-mc)-c*(f-fc)) + par-pc
-    if cortante != derecha_v or flector != derecha_m:
-        raise ValueError("equilibrio")
+    cortante, flector = (None, None) if c is None else esfuerzos(c, True)
     if diagramas is not None and len(x) <= 65 and len(tramos)+len(fuerzas)+len(pares) <= 128:
         def seccion(pos, incluir_nodo):
             v, momento = esfuerzos(pos, incluir_nodo)
             return (v if viga.cortante_positivo_hacia_abajo else -v,
                     momento if viga.momento_positivo_antihorario else -momento)
         diagramas["cuerpo"] = dibujar_viga(x, c, reacciones, fuerzas, pares, tramos, cortante, flector)
-        diagramas["curvas"] = dibujar_curvas(x, c, seccion)
+        if incluir_curvas:
+            diagramas["curvas"] = dibujar_curvas(x, c, seccion)
+    if c is None:
+        def reaccion(nombre, valor):
+            sentido = " hacia arriba" if valor > 0 else " hacia abajo" if valor < 0 else ""
+            return f"{nombre} = {rotulo(abs(valor))} kN{sentido}"
+        resumen = reaccion("A", ra) + " y " + reaccion("B", rb) + "."
+        return Desarrollo(pasos=[], exacto="", aproximacion="", nota=resumen, lectura=resumen)
+    fc, mc, pc = cargas(c)
+    derecha_v = (f-fc) - sum(r for pos, r in reacciones if pos > c)
+    derecha_m = sum((pos-c)*r for pos, r in reacciones if pos > c) - ((m-mc)-c*(f-fc)) + par-pc
+    if cortante != derecha_v or flector != derecha_m:
+        raise ValueError("equilibrio")
     if not viga.cortante_positivo_hacia_abajo:
         cortante = -cortante
     if not viga.momento_positivo_antihorario:

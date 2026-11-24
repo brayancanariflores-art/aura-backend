@@ -37,7 +37,10 @@ def figura(alto, contenido):
 def dibujar_viga(nodos, c, reacciones, fuerzas, pares, cargas, cortante, momento):
     piezas = []
     escala_cargas = max((max(abs(w0), abs(w1)) for _, _, w0, w1 in cargas), default=1) or 1
-    for limite, y, titulo in ((nodos[-1], 92, "Viga completa"), (c, 304, "Tramo izquierdo hasta C")):
+    vistas = [(nodos[-1], 92, "Viga completa")]
+    if c is not None:
+        vistas.append((c, 304, "Tramo izquierdo hasta C"))
+    for limite, y, titulo in vistas:
         corte = limite == c
         def px(pos):
             return 47 + 345 * float(pos / limite)
@@ -85,8 +88,9 @@ def dibujar_viga(nodos, c, reacciones, fuerzas, pares, cargas, cortante, momento
                 desde,hasta = (y+44,y+20) if r>0 else (y+20,y+44)
                 piezas.append(flecha(x,desde,x,hasta,"#ac4b20"))
             piezas.append(texto(x,y+60,f"{nombre}: {numero(abs(r))} kN"))
-        xc = px(c)
-        piezas.extend([linea(xc,y-7,xc,y+8,"#9b344d",2), texto(xc-4,y+22,"C","end")])
+        if c is not None:
+            xc = px(c)
+            piezas.extend([linea(xc,y-7,xc,y+8,"#9b344d",2), texto(xc-4,y+22,"C","end")])
         for p, q in zip(nodos, nodos[1:]):
             if q > limite:
                 break
@@ -100,7 +104,7 @@ def dibujar_viga(nodos, c, reacciones, fuerzas, pares, cargas, cortante, momento
             if momento:
                 piezas.extend([giro(xc+31,y,momento>0), texto(xc+51,y+4,"M","start")])
             piezas.append(texto(12,y+122,f"N = 0 kN    ·    |V| = {numero(abs(cortante))} kN    ·    |M| = {numero(abs(momento))} kN·m","start"))
-    return figura(444,piezas)
+    return figura(444 if c is not None else 204, piezas)
 
 
 def dibujar_curvas(nodos, c, seccion):
@@ -122,13 +126,17 @@ def dibujar_curvas(nodos, c, seccion):
             return techo+112-72*(v-minimo)/escala
         puntos = " ".join(f"{px(fila[0]):.2f},{py(fila[indice]):.2f}" for fila in muestras)
         piezas.extend([texto(12,techo+20,titulo+" ("+unidad+")","start"),linea(70,py(0),415,py(0)),
-                       texto(64,py(0)+4,"0","end"),linea(px(c),techo+32,px(c),techo+118,"#c4cdd3"),
+                       texto(64,py(0)+4,"0","end"),
                        f'<polyline points="{puntos}" fill="none" stroke="#166f8b" stroke-width="2.5"/>'])
         for extremo in (minimo, maximo):
             if extremo and abs(py(extremo) - py(0)) > 14:
                 piezas.append(texto(64, py(extremo)+4, format(extremo, ".5g").replace(".", ","), "end"))
+        piezas.extend([texto(70,techo+136,"0 m","start"), texto(412,techo+136,numero(nodos[-1])+" m","end")])
+        if c is None:
+            continue
+        piezas.append(linea(px(c),techo+32,px(c),techo+118,"#c4cdd3"))
         vc = float(seccion(c,True)[indice-1])
         piezas.extend([f'<circle cx="{px(c):.2f}" cy="{py(vc):.2f}" r="4" fill="#ac4b20"/>',
-                       texto(70,techo+136,"0 m","start"),texto(px(c),techo+136,"C"),texto(412,techo+136,numero(nodos[-1])+" m","end"),
+                       texto(px(c),techo+136,"C"),
                        texto(12,techo+157,f"En C: {numero(vc)} {unidad}","start")])
     return figura(328,piezas)
