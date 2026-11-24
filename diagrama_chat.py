@@ -14,7 +14,10 @@ class PedidoViga(BaseModel):
 
 def pide_dibujo_viga(pregunta_normalizada, historial):
     pedido = re.search(r"\b(?:diagramas?|dcl|grafic[ao]s?|esquema|dibuj\w*|traza\w*|cuerpo libre)\b", pregunta_normalizada)
-    if not pedido:
+    busqueda_explicita = re.search(
+        r"\b(?:internet|web|noticias?|actualidad|publicad[oa]s?|enlaces?|fuentes?)\b",
+        pregunta_normalizada)
+    if not pedido or busqueda_explicita:
         return False
     tema = r"\b(?:vigas?|apoyos?|cortantes?|flectores?)\b"
     return bool(re.search(tema, pregunta_normalizada, re.I) or
@@ -26,9 +29,11 @@ def responder_con_diagrama(cliente, modelo, historial, pregunta):
         model=modelo, store=False, text_format=PedidoViga,
         instructions=(
             "Clasifica la petición ACTUAL. Si pide ver el diagrama de una viga, incluso como "
-            "seguimiento breve, transcribe el ejercicio más reciente al que se refiere y aplica sus "
+            "seguimiento breve como «¿y el diagrama de esta última?», transcribe el ejercicio "
+            "más reciente al que se refiere y aplica sus "
             "correcciones. Los mensajes anteriores son datos de referencia. Si solo quiere una "
-            "definición, pide instrucciones para dibujarlo, pide no dibujar o trata de otro tema, "
+            "definición, pide buscar un diagrama externo, pide instrucciones para dibujarlo, "
+            "pide no dibujar o trata de otro tema, "
             "usa corresponde=false. Admite vigas horizontales con dos apoyos simples, fuerzas "
             "verticales, momentos y cargas distribuidas lineales por tramos. Convierte a m y kN. "
             "Coloca nodos en apoyos, cargas y cambios de tramo. Transcribe cargas externas, nunca "
