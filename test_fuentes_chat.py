@@ -1,11 +1,25 @@
 import unittest
 
-from fuentes_chat import SECCION, pedido_fuentes, sin_citas
+from fuentes_chat import SECCION, pedido_fuentes, pide_busqueda_directa, sin_citas
 
 URL = "https://liquipedia.net/dota2/Game_Versions?utm_source=openai"
 
 
 class FuentesChatTest(unittest.TestCase):
+    def test_un_relato_personal_sigue_en_el_chat(self):
+        for frase in ("Hoy tuve un turno pesado", "Ayer vi las noticias y me quedé triste",
+                      "Hoy me siento nervioso. ¿Qué le digo a mi primo?",
+                      "Esta semana terminé el proyecto", "Mi internet anda lento"):
+            with self.subTest(frase=frase):
+                self.assertFalse(pide_busqueda_directa(frase))
+                self.assertEqual(pedido_fuentes(frase), (False, False))
+
+    def test_pedidos_expresos_de_actualidad(self):
+        for frase in ("Busca las noticias de hoy", "AURA, busca en internet el horario",
+                      "¿Me puedes buscar las últimas noticias?", "Noticias de ayer"):
+            with self.subTest(frase=frase):
+                self.assertTrue(pide_busqueda_directa(frase))
+
     def test_omite_la_cita_y_la_lista_sin_perder_texto(self):
         for cita in (f"([liquipedia.net]({URL}))", f"[liquipedia.net]({URL})",
                      f"[Liquipedia]({URL})", f"({URL})", URL):

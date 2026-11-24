@@ -64,7 +64,7 @@ if ai_client is None:
     logger.warning("OPENAI_API_KEY no esta configurada")
 
 from calendario_chat import contexto_fecha, hora_del_chat, respuesta_calendario
-from fuentes_chat import SECCION, pedido_fuentes, sin_citas
+from fuentes_chat import SECCION, pedido_fuentes, pide_busqueda_directa, sin_citas
 from voz_web import voice_routes
 app.include_router(voice_routes(autorizar, lambda: ai_client))
 
@@ -3926,14 +3926,6 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
         raise HTTPException(status_code=503, detail="OpenAI no esta configurado en el servidor")
 
     try:
-        # Ruta rápida: preguntas explícitamente actuales van directamente a la búsqueda.
-        # Evita una llamada extra al modelo y reduce confusiones con memoria histórica.
-        requiere_web = bool(re.search(
-            r"\b(?:busca|buscar|internet|noticias?|hoy|ayer|esta semana|"
-            r"actualidad|actualizado|recientes?|últimas?|ultimas?|enlaces?|"
-            r"fuentes?|navega|web|publicad[oa]s?|últimos días)\b",
-            pregunta, re.IGNORECASE
-        ))
         mostrar_fuentes, pide_anteriores = pedido_fuentes(pregunta)
         if pide_anteriores:
             historial = cargar_historial_reciente(limite=1)
@@ -3943,7 +3935,7 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
             guardar_en_historial("user", pregunta)
             guardar_en_historial("assistant", respuesta + (SECCION + fuentes if fuentes else ""))
             return {"respuesta": respuesta}
-        if requiere_web or mostrar_fuentes:
+        if pide_busqueda_directa(pregunta) or mostrar_fuentes:
             respuesta_web = web_search(pregunta, ahora)
             guardar_en_historial("user", pregunta)
             guardar_en_historial("assistant", respuesta_web)
@@ -4006,7 +3998,8 @@ def procesar_chat(peticion: PeticionChat, _auth=Depends(autorizar)):
                     "El servidor selecciona y guarda automaticamente hechos duraderos no sensibles. "
                     "No preguntes si quieres recordar datos: el servidor lo gestiona. "
                     "No afirmes que una memoria se actualizo sin confirmacion del servidor. "
-                    "Para noticias, información de hoy o enlaces actuales utiliza web_search; "
+                    "Usa web_search cuando la respuesta requiera comprobar hechos actuales, noticias o enlaces. "
+                    "Una referencia de tiempo en una experiencia personal no requiere una búsqueda. "
                     "nunca inventes resultados ni afirmes haber navegado si no se usó la herramienta. "
                     "Responde directamente. Omite citas, enlaces y avisos sobre las fuentes salvo petición explícita."
                 ),
